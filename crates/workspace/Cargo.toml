@@ -1,0 +1,11 @@
+[package]
+name = "codehealth-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+codehealth-parser.workspace = true
+ignore.workspace = true
+thiserror.workspace = true

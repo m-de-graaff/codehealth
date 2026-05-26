@@ -1,0 +1,28 @@
+[package]
+name = "codehealth-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "codehealth"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+codehealth-config.workspace = true
+codehealth-core.workspace = true
+codehealth-language-python.workspace = true
+codehealth-language-rust.workspace = true
+codehealth-language-typescript.workspace = true
+codehealth-parser.workspace = true
+codehealth-reporters.workspace = true
+codehealth-workspace.workspace = true
+miette.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+serde_json.workspace = true

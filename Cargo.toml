@@ -1,0 +1,64 @@
+[workspace]
+members = [
+    "crates/autofix",
+    "crates/cli",
+    "crates/config",
+    "crates/core",
+    "crates/duplication",
+    "crates/integrations",
+    "crates/languages/python",
+    "crates/languages/rust",
+    "crates/languages/typescript",
+    "crates/parser",
+    "crates/reporters",
+    "crates/rules",
+    "crates/rules_fastapi",
+    "crates/rules_react",
+    "crates/symbols",
+    "crates/testing",
+    "crates/workspace",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+authors = ["Codehealth contributors"]
+description = "Local-first code health and duplication detector."
+
+[workspace.dependencies]
+anyhow = "1.0"
+assert_cmd = "2.0"
+clap = { version = "4.5", features = ["derive"] }
+ignore = "0.4"
+insta = { version = "1.40", features = ["json"] }
+miette = { version = "7.2", features = ["fancy"] }
+predicates = "3.1"
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+toml = "0.8"
+tree-sitter = "0.25"
+walkdir = "2.5"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+codehealth-autofix = { path = "crates/autofix" }
+codehealth-config = { path = "crates/config" }
+codehealth-core = { path = "crates/core" }
+codehealth-duplication = { path = "crates/duplication" }
+codehealth-integrations = { path = "crates/integrations" }
+codehealth-language-python = { path = "crates/languages/python" }
+codehealth-language-rust = { path = "crates/languages/rust" }
+codehealth-language-typescript = { path = "crates/languages/typescript" }
+codehealth-parser = { path = "crates/parser" }
+codehealth-reporters = { path = "crates/reporters" }
+codehealth-rules = { path = "crates/rules" }
+codehealth-rules-fastapi = { path = "crates/rules_fastapi" }
+codehealth-rules-react = { path = "crates/rules_react" }
+codehealth-symbols = { path = "crates/symbols" }
+codehealth-testing = { path = "crates/testing" }
+codehealth-workspace = { path = "crates/workspace" }
