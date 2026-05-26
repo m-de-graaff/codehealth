@@ -186,6 +186,8 @@ pub struct Finding {
     pub detection_reason: String,
     pub autofix: AutofixSafety,
     pub autofix_explanation: String,
+    pub is_suppressed: bool,
+    pub suppression: Option<Suppression>,
 }
 
 impl Finding {
@@ -204,6 +206,23 @@ pub struct FindingLocation {
     pub span: Option<SourceSpan>,
     pub start: Option<Location>,
     pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Suppression {
+    pub rule_id: String,
+    pub path: PathBuf,
+    pub line: usize,
+    pub kind: SuppressionKind,
+    pub reason: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppressionKind {
+    NextLine,
+    Block,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,6 +431,7 @@ impl ScanResult {
 pub struct ScanStats {
     pub files_scanned: usize,
     pub definitions_indexed: usize,
+    pub suppressed_findings: usize,
 }
 
 pub fn sort_findings(findings: &mut [Finding]) {
@@ -444,6 +464,7 @@ fn primary_span_start(finding: &Finding) -> usize {
 pub fn calculate_score(findings: &[Finding]) -> u8 {
     let penalty: u16 = findings
         .iter()
+        .filter(|finding| !finding.is_suppressed)
         .map(|finding| match finding.severity {
             Severity::Info => 0,
             Severity::Low => 1,
@@ -502,7 +523,7 @@ mod tests {
         let finding = Finding {
             finding_id: "one".to_string(),
             baseline_key: "one".to_string(),
-            rule_id: "duplicate.exact_file".to_string(),
+            rule_id: "duplicate.exact.file".to_string(),
             kind: FindingKind::ExactDuplicate,
             severity: Severity::High,
             confidence: Confidence::Certain,
@@ -515,6 +536,8 @@ mod tests {
             detection_reason: String::new(),
             autofix: AutofixSafety::Unavailable,
             autofix_explanation: String::new(),
+            is_suppressed: false,
+            suppression: None,
         };
 
         assert_eq!(calculate_score(&[finding]), 92);

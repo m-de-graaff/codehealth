@@ -10,7 +10,7 @@ use std::{
 use thiserror::Error;
 use xxhash_rust::xxh3::xxh3_64;
 
-pub const EXACT_FILE_RULE: &str = "duplicate.exact_file";
+pub const EXACT_FILE_RULE: &str = "duplicate.exact.file";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateInput {
@@ -30,6 +30,7 @@ struct FileFingerprint {
     path: PathBuf,
     language: String,
     source_len: usize,
+    first_relevant_location: Location,
     fingerprint: BodyFingerprint,
 }
 
@@ -57,6 +58,7 @@ pub fn find_exact_file_duplicates(
                 path: input.path.clone(),
                 language: input.language.clone(),
                 source_len: source.len(),
+                first_relevant_location: first_relevant_location(&source),
                 fingerprint,
             });
     }
@@ -121,9 +123,9 @@ fn build_exact_file_finding(files: &[FileFingerprint]) -> Finding {
                     end: file.source_len,
                 }),
                 start: Some(Location {
-                    line: 1,
-                    column: 1,
-                    byte_offset: 0,
+                    line: file.first_relevant_location.line,
+                    column: file.first_relevant_location.column,
+                    byte_offset: file.first_relevant_location.byte_offset,
                 }),
                 language: Some(file.language.clone()),
             })
@@ -139,6 +141,36 @@ fn build_exact_file_finding(files: &[FileFingerprint]) -> Finding {
         autofix: AutofixSafety::SuggestionOnly,
         autofix_explanation: "Exact duplicate files are not auto-fixed because choosing which file to keep can change imports, ownership, and public APIs."
             .to_string(),
+        is_suppressed: false,
+        suppression: None,
+    }
+}
+
+fn first_relevant_location(source: &str) -> Location {
+    let mut byte_offset = 0;
+
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        let is_suppression = trimmed.contains("codehealth-ignore-");
+        if !trimmed.is_empty() && !is_suppression {
+            return Location {
+                line: index + 1,
+                column: line
+                    .chars()
+                    .position(|character| !character.is_whitespace())
+                    .map(|column| column + 1)
+                    .unwrap_or(1),
+                byte_offset,
+            };
+        }
+
+        byte_offset += line.len() + 1;
+    }
+
+    Location {
+        line: 1,
+        column: 1,
+        byte_offset: 0,
     }
 }
 

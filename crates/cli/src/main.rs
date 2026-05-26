@@ -1,13 +1,19 @@
 use anyhow::{bail, Context};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use codehealth_config::{config_path, default_config_toml, CodehealthConfig, DEFAULT_CONFIG_FILE};
-use codehealth_core::{Confidence, Finding, FindingFilters, ScanMode, ScanResult, Severity};
+use codehealth_config::{
+    config_path, default_config_toml, parse_suppressions, path_matches_any, CodehealthConfig,
+    LoadedConfig, SuppressionDirective, DEFAULT_CONFIG_FILE,
+};
+use codehealth_core::{
+    Confidence, Finding, FindingFilters, ScanMode, ScanResult, Severity, Suppression,
+    SuppressionKind,
+};
 use codehealth_duplication::{
     find_exact_file_duplicates, fingerprint_normalized_body, normalize_source, DuplicateInput,
 };
 use codehealth_parser::{LanguageRegistry, ParseInput};
 use codehealth_reporters::{render_result, ReportFormat, ReportOptions};
-use codehealth_rules::{find_rule, rule_catalog};
+use codehealth_rules::{canonical_rule_id, find_rule, rule_catalog};
 use codehealth_workspace::{discover_files, WorkspaceFile};
 use std::{
     collections::BTreeSet,
@@ -122,6 +128,9 @@ struct RunArgs {
     dry_run: bool,
 
     #[arg(long)]
+    show_suppressed: bool,
+
+    #[arg(long)]
     config: Option<PathBuf>,
 }
 
@@ -150,8 +159,7 @@ enum ConfigCommand {
 
 #[derive(Debug, Args)]
 struct ConfigValidateArgs {
-    #[arg(default_value = DEFAULT_CONFIG_FILE)]
-    path: PathBuf,
+    path: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -293,14 +301,17 @@ impl FrameworkArg {
 enum FailOn {
     #[value(name = "high")]
     High,
+    #[value(name = "new-high")]
+    NewHigh,
     #[value(name = "new-medium")]
     NewMedium,
 }
 
 fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
-    let config = CodehealthConfig::load(args.config.as_deref(), &cwd)
+    let loaded_config = CodehealthConfig::load_with_metadata(args.config.as_deref(), &cwd)
         .context("failed to load codehealth config")?;
+    let config = &loaded_config.config;
     let format = args
         .format
         .unwrap_or_else(|| OutputFormat::from_config(&config.report.default_format));
@@ -309,8 +320,8 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
     let registry = build_language_registry();
     let files =
         discover_files(&args.path, &registry).context("failed to discover workspace files")?;
-    let files = filter_files_by_language(files, &args.language);
     let mut result = ScanResult::new(args.path.canonicalize().unwrap_or(args.path.clone()));
+    let files = filter_files_by_config(files, &result.root, config, &args.language);
     result.stats.files_scanned = files.len();
 
     let _accepted_but_not_active_yet = (
@@ -323,13 +334,20 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
     );
 
     let findings = match mode {
-        ScanMode::All | ScanMode::DuplicatesOnly => run_duplicate_checks(&files)?,
+        ScanMode::All | ScanMode::DuplicatesOnly => run_duplicate_checks(&files, config)?,
     };
 
-    result.findings = findings
-        .into_iter()
-        .filter(|finding| filters.allows(finding))
-        .collect();
+    result.findings = apply_config_policy(
+        findings,
+        &result.root,
+        config,
+        &files,
+        args.show_suppressed,
+        &mut result.stats.suppressed_findings,
+    )?
+    .into_iter()
+    .filter(|finding| filters.allows(finding))
+    .collect();
     let result = result.finalize();
 
     let output = render_result(
@@ -339,7 +357,12 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
     .context("failed to render report")?;
     write_or_print(args.output.as_deref(), &output)?;
 
-    if should_fail(&result, args.fail_on, args.baseline.as_ref(), &config)? {
+    if should_fail(
+        &result,
+        args.fail_on,
+        args.baseline.as_ref(),
+        &loaded_config,
+    )? {
         Ok(1)
     } else {
         Ok(0)
@@ -364,25 +387,40 @@ fn filters_from_args(args: &RunArgs) -> FindingFilters {
     }
 }
 
-fn filter_files_by_language(
+fn filter_files_by_config(
     files: Vec<WorkspaceFile>,
+    root: &Path,
+    config: &CodehealthConfig,
     languages: &[LanguageArg],
 ) -> Vec<WorkspaceFile> {
-    if languages.is_empty() {
-        return files;
-    }
+    let effective_languages = if languages.is_empty() {
+        config.project.languages.clone()
+    } else {
+        languages
+            .iter()
+            .map(|language| language.as_str().to_string())
+            .collect()
+    };
 
     files
         .into_iter()
         .filter(|file| {
-            languages
-                .iter()
-                .any(|language| language.as_str().eq_ignore_ascii_case(file.language.name))
+            !path_matches_any(root, &file.path, &config.ignore.paths)
+                && effective_languages
+                    .iter()
+                    .any(|language| language.eq_ignore_ascii_case(file.language.name))
         })
         .collect()
 }
 
-fn run_duplicate_checks(files: &[WorkspaceFile]) -> anyhow::Result<Vec<Finding>> {
+fn run_duplicate_checks(
+    files: &[WorkspaceFile],
+    config: &CodehealthConfig,
+) -> anyhow::Result<Vec<Finding>> {
+    if !config.duplication.enabled || !config.duplication.detect_exact {
+        return Ok(Vec::new());
+    }
+
     let inputs = files
         .iter()
         .map(|file| DuplicateInput {
@@ -392,6 +430,126 @@ fn run_duplicate_checks(files: &[WorkspaceFile]) -> anyhow::Result<Vec<Finding>>
         .collect::<Vec<_>>();
 
     find_exact_file_duplicates(&inputs).context("failed to detect exact duplicates")
+}
+
+fn apply_config_policy(
+    findings: Vec<Finding>,
+    root: &Path,
+    config: &CodehealthConfig,
+    files: &[WorkspaceFile],
+    show_suppressed: bool,
+    suppressed_count: &mut usize,
+) -> anyhow::Result<Vec<Finding>> {
+    let suppressions = collect_suppressions(files)?;
+    let mut output = Vec::new();
+
+    for mut finding in findings {
+        let paths = finding
+            .locations
+            .iter()
+            .map(|location| location.path.clone())
+            .collect::<Vec<_>>();
+
+        if !rule_options_allow(&finding, root, config) {
+            continue;
+        }
+
+        let level = config.level_for_rule(&finding.rule_id, root, &paths);
+        if level.is_off() {
+            continue;
+        }
+        if let Some(severity) = level.severity() {
+            finding.severity = severity;
+        }
+
+        if let Some(suppression) = find_suppression_for_finding(&finding, &suppressions) {
+            for warning in &suppression.warnings {
+                let path = suppression.path.to_string_lossy().replace('\\', "/");
+                eprintln!("warning: {}:{}: {warning}", path, suppression.line);
+            }
+            finding.is_suppressed = true;
+            finding.suppression = Some(Suppression {
+                rule_id: suppression.rule_id.clone(),
+                path: suppression.path.clone(),
+                line: suppression.line,
+                kind: match suppression.kind {
+                    codehealth_config::SuppressionKind::NextLine => SuppressionKind::NextLine,
+                    codehealth_config::SuppressionKind::Block => SuppressionKind::Block,
+                },
+                reason: suppression.reason.clone(),
+                warnings: suppression.warnings.clone(),
+            });
+            *suppressed_count += 1;
+        }
+
+        if !finding.is_suppressed || show_suppressed {
+            output.push(finding);
+        }
+    }
+
+    Ok(output)
+}
+
+fn rule_options_allow(finding: &Finding, root: &Path, config: &CodehealthConfig) -> bool {
+    let Some(options) = config.rule_options_for(&finding.rule_id) else {
+        return true;
+    };
+    let paths = finding
+        .locations
+        .iter()
+        .map(|location| location.path.as_path())
+        .collect::<Vec<_>>();
+
+    if !options.include_paths.is_empty()
+        && !paths
+            .iter()
+            .any(|path| path_matches_any(root, path, &options.include_paths))
+    {
+        return false;
+    }
+
+    if paths
+        .iter()
+        .any(|path| path_matches_any(root, path, &options.exclude_paths))
+    {
+        return false;
+    }
+
+    if let Some(min_confidence) = options.min_confidence {
+        if finding.confidence < min_confidence {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn collect_suppressions(files: &[WorkspaceFile]) -> anyhow::Result<Vec<SuppressionDirective>> {
+    let mut suppressions = Vec::new();
+
+    for file in files {
+        let source = std::fs::read_to_string(&file.path)
+            .with_context(|| format!("failed to read {}", file.path.display()))?;
+        suppressions.extend(parse_suppressions(&file.path, &source));
+    }
+
+    Ok(suppressions)
+}
+
+fn find_suppression_for_finding(
+    finding: &Finding,
+    suppressions: &[SuppressionDirective],
+) -> Option<SuppressionDirective> {
+    let canonical_rule = canonical_rule_id(&finding.rule_id)?;
+    finding.locations.iter().find_map(|location| {
+        let line = location.start.map(|start| start.line)?;
+        suppressions
+            .iter()
+            .find(|suppression| {
+                suppression.path == location.path && suppression.matches(canonical_rule, line)
+            })
+            .cloned()
+    })
 }
 
 fn write_or_print(output_path: Option<&Path>, output: &str) -> anyhow::Result<()> {
@@ -417,29 +575,81 @@ fn should_fail(
     result: &ScanResult,
     fail_on: Option<FailOn>,
     baseline_path: Option<&PathBuf>,
-    config: &CodehealthConfig,
+    loaded_config: &LoadedConfig,
 ) -> anyhow::Result<bool> {
-    let Some(fail_on) = fail_on else {
-        return Ok(false);
+    let fail_on_values = if let Some(fail_on) = fail_on {
+        vec![fail_on]
+    } else if loaded_config.path.is_some() {
+        loaded_config
+            .config
+            .ci
+            .fail_on
+            .iter()
+            .filter_map(|value| config_fail_on(value))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
     };
 
-    match fail_on {
-        FailOn::High => Ok(result
-            .findings
-            .iter()
-            .any(|finding| finding.severity >= Severity::High)),
-        FailOn::NewMedium => {
-            let baseline_path = baseline_path
-                .cloned()
-                .or_else(|| config.ci.baseline.clone())
-                .unwrap_or_else(|| PathBuf::from(".codehealth/baseline.json"));
-            let baseline = load_baseline_keys(&baseline_path)?;
+    if fail_on_values.is_empty() {
+        return Ok(false);
+    }
 
-            Ok(result.findings.iter().any(|finding| {
-                finding.severity >= Severity::Medium && !baseline.contains(&finding.baseline_key)
-            }))
+    for fail_on in fail_on_values {
+        let should_fail = match fail_on {
+            FailOn::High => result
+                .findings
+                .iter()
+                .filter(|finding| !finding.is_suppressed)
+                .any(|finding| finding.severity >= Severity::High),
+            FailOn::NewHigh => has_new_finding_at_or_above(
+                result,
+                Severity::High,
+                baseline_path,
+                &loaded_config.config,
+            )?,
+            FailOn::NewMedium => has_new_finding_at_or_above(
+                result,
+                Severity::Medium,
+                baseline_path,
+                &loaded_config.config,
+            )?,
+        };
+
+        if should_fail {
+            return Ok(true);
         }
     }
+
+    Ok(false)
+}
+
+fn config_fail_on(value: &str) -> Option<FailOn> {
+    match value {
+        "high" => Some(FailOn::High),
+        "new_high" => Some(FailOn::NewHigh),
+        "new_medium" => Some(FailOn::NewMedium),
+        _ => None,
+    }
+}
+
+fn has_new_finding_at_or_above(
+    result: &ScanResult,
+    severity: Severity,
+    baseline_path: Option<&PathBuf>,
+    config: &CodehealthConfig,
+) -> anyhow::Result<bool> {
+    let baseline_path = baseline_path
+        .cloned()
+        .or_else(|| config.ci.baseline.clone())
+        .unwrap_or_else(|| PathBuf::from(".codehealth/baseline.json"));
+    let baseline = load_baseline_keys(&baseline_path)?;
+
+    Ok(result
+        .findings
+        .iter()
+        .filter(|finding| !finding.is_suppressed)
+        .any(|finding| finding.severity >= severity && !baseline.contains(&finding.baseline_key)))
 }
 
 fn load_baseline_keys(path: &Path) -> anyhow::Result<BTreeSet<String>> {
@@ -541,9 +751,14 @@ fn run_init(args: InitArgs) -> anyhow::Result<u8> {
 fn run_config(command: ConfigCommand) -> anyhow::Result<u8> {
     match command {
         ConfigCommand::Validate(args) => {
-            CodehealthConfig::validate_path(&args.path)
-                .with_context(|| format!("invalid config {}", args.path.display()))?;
-            println!("Config valid: {}", args.path.display());
+            let cwd = std::env::current_dir().context("failed to determine current directory")?;
+            let loaded = CodehealthConfig::validate_path(args.path.as_deref(), &cwd)
+                .context("invalid codehealth config")?;
+            if let Some(path) = loaded.path {
+                println!("Config valid: {}", path.display());
+            } else {
+                println!("Config valid: defaults (no codehealth.toml found)");
+            }
             Ok(0)
         }
     }

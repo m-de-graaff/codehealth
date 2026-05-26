@@ -80,7 +80,7 @@ fn dupes_reports_exact_file_duplicates() {
         .arg("never")
         .assert()
         .success()
-        .stdout(contains("HIGH  duplicate.exact_file"))
+        .stdout(contains("HIGH  duplicate.exact.file"))
         .stdout(contains("a.ts:1:1"))
         .stdout(contains("b.ts:1:1"));
 }
@@ -226,8 +226,178 @@ fn explain_known_rule_works() {
         .arg("duplicate.exact_file")
         .assert()
         .success()
+        .stdout(contains("duplicate.exact.file"))
         .stdout(contains("Exact duplicate file"))
         .stdout(contains("Why detected"));
+}
+
+#[test]
+fn config_can_disable_exact_duplicates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("Findings: 0"));
+}
+
+#[test]
+fn config_rule_severity_override_changes_output_and_exit_behavior() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [rules]
+            "duplicate.exact_file" = "warn"
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .arg("--config")
+        .arg(config)
+        .arg("--fail-on")
+        .arg("high")
+        .assert()
+        .success()
+        .stdout(contains("MEDIUM  duplicate.exact.file"));
+}
+
+#[test]
+fn ignore_paths_remove_files_from_scan() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [ignore]
+            paths = ["duplicates"]
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(workspace_root().join("fixtures"))
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("Findings: 0"));
+}
+
+#[test]
+fn config_validate_rejects_unknown_rule_ids() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [rules]
+            "not.a.rule" = "warn"
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("config")
+        .arg("validate")
+        .arg(config)
+        .assert()
+        .failure()
+        .stderr(contains("unknown rule id 'not.a.rule'"));
+}
+
+#[test]
+fn config_validate_rejects_invalid_rule_levels() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [rules]
+            "duplicate.exact.file" = "sometimes"
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("config")
+        .arg("validate")
+        .arg(config)
+        .assert()
+        .failure()
+        .stderr(contains("invalid rule level"));
+}
+
+#[test]
+fn suppressions_hide_findings_by_default_and_can_be_shown() {
+    let mut hidden = Command::cargo_bin("codehealth").expect("binary exists");
+    hidden
+        .arg("scan")
+        .arg(fixture("suppressions"))
+        .assert()
+        .success()
+        .stdout(contains("Findings: 0"))
+        .stdout(contains("Suppressed findings: 2"))
+        .stderr(contains("suppression reason is missing"));
+
+    let mut shown = Command::cargo_bin("codehealth").expect("binary exists");
+    shown
+        .arg("scan")
+        .arg(fixture("suppressions"))
+        .arg("--show-suppressed")
+        .assert()
+        .success()
+        .stdout(contains("duplicate.exact.file  (suppressed)"))
+        .stdout(contains(
+            "Suppression warning: suppression reason is missing",
+        ));
+}
+
+#[test]
+fn config_discovery_walks_parent_directories() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let nested = temp.path().join("nested");
+    std::fs::create_dir_all(&nested).expect("nested dir");
+    std::fs::write(
+        temp.path().join("codehealth.toml"),
+        r#"
+            [rules]
+            "duplicate.exact.file" = "off"
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .current_dir(&nested)
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .assert()
+        .success()
+        .stdout(contains("Findings: 0"));
 }
 
 #[test]

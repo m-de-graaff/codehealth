@@ -1,3 +1,4 @@
+// codehealth-ignore-next-line duplicate.exact_file
 export function add(left: number, right: number): number {
   const normalizedValue = left + right;
   const adjustedValue = normalizedValue + 1;

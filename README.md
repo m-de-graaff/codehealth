@@ -29,9 +29,26 @@ codehealth scan . --format text --color auto
 codehealth scan . --format sarif --output codehealth.sarif
 codehealth scan . --fail-on high
 codehealth dupes . --min-confidence high
+codehealth scan . --show-suppressed
 codehealth rules
-codehealth explain duplicate.exact_file
+codehealth explain duplicate.exact.file
 ```
+
+`codehealth.toml` is discovered from the current directory upward, or explicitly with `--config`.
+Rule IDs are reported in canonical dotted form, for example `duplicate.exact.file`; older aliases such as `duplicate.exact_file` are still accepted in config, suppressions, and `explain`.
+
+Inline suppressions are supported:
+
+```ts
+// codehealth-ignore-next-line duplicate.exact.file -- intentional generated copy
+export function generatedAdapter() {}
+
+// codehealth-ignore-start duplicate.exact.file -- compatibility layer
+export function legacyAdapter() {}
+// codehealth-ignore-end duplicate.exact.file
+```
+
+Suppressed findings are hidden by default and counted in the summary. Use `--show-suppressed` to include them in text/JSON/SARIF/HTML reports.
 
 Hidden debug commands are available for development:
 

@@ -1,8 +1,11 @@
 use codehealth_core::{AutofixSafety, Confidence, Finding, FindingKind, Severity};
 
+pub const DUPLICATE_EXACT_FILE: &str = "duplicate.exact.file";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleMetadata {
     pub code: &'static str,
+    pub aliases: &'static [&'static str],
     pub name: &'static str,
     pub kind: FindingKind,
     pub default_severity: Severity,
@@ -29,10 +32,25 @@ pub fn run_noop_rules() -> Vec<Finding> {
     Vec::new()
 }
 
+pub fn canonical_rule_id(rule_id: &str) -> Option<&'static str> {
+    let normalized = rule_id.trim();
+    rule_catalog()
+        .into_iter()
+        .find(|rule| {
+            rule.code.eq_ignore_ascii_case(normalized)
+                || rule
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(normalized))
+        })
+        .map(|rule| rule.code)
+}
+
 pub fn rule_catalog() -> Vec<RuleMetadata> {
     let mut rules = vec![
         RuleMetadata {
-            code: "duplicate.exact_file",
+            code: DUPLICATE_EXACT_FILE,
+            aliases: &["duplicate.exact_file"],
             name: "Exact duplicate file",
             kind: FindingKind::ExactDuplicate,
             default_severity: Severity::High,
@@ -47,40 +65,67 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             autofix_explanation: "The tool cannot safely choose which file to keep or update imports automatically.",
         },
         planned(
-            "duplicate.structural_function",
+            "duplicate.name.function",
+            &[],
+            "Duplicate function name",
+            FindingKind::DuplicateName,
+        ),
+        planned(
+            "duplicate.structural.function",
+            &["duplicate.structural_function"],
             "Structural duplicate function",
             FindingKind::StructuralDuplicate,
         ),
         planned(
-            "duplicate.near_function",
+            "duplicate.near.function",
+            &["duplicate.near_function"],
             "Near duplicate function",
             FindingKind::NearDuplicate,
         ),
         planned(
             "style.boolean_return_simplifiable",
+            &[],
             "Boolean return simplifiable",
             FindingKind::Style,
         ),
         planned(
-            "react.large_component",
+            "react.large.component",
+            &["react.large_component"],
             "Large React component",
             FindingKind::React,
         )
         .with_framework("react"),
         planned(
-            "react.unstable_list_key",
+            "react.unstable.list_key",
+            &["react.unstable_list_key"],
             "Unstable React list key",
             FindingKind::React,
         )
         .with_framework("react"),
         planned(
-            "fastapi.missing_response_model",
+            "fastapi.duplicate.route",
+            &["fastapi.duplicate_route"],
+            "Duplicate FastAPI route",
+            FindingKind::FastApi,
+        )
+        .with_framework("fastapi"),
+        planned(
+            "fastapi.blocking_call_in_async_route",
+            &[],
+            "Blocking call in async FastAPI route",
+            FindingKind::FastApi,
+        )
+        .with_framework("fastapi"),
+        planned(
+            "fastapi.missing.response_model",
+            &["fastapi.missing_response_model"],
             "Missing FastAPI response model",
             FindingKind::FastApi,
         )
         .with_framework("fastapi"),
         planned(
             "rust.unwrap_expect_policy",
+            &[],
             "Rust unwrap/expect policy",
             FindingKind::Rust,
         )
@@ -92,14 +137,22 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
 }
 
 pub fn find_rule(code: &str) -> Option<RuleMetadata> {
-    rule_catalog()
-        .into_iter()
-        .find(|rule| rule.code.eq_ignore_ascii_case(code))
+    canonical_rule_id(code).and_then(|canonical| {
+        rule_catalog()
+            .into_iter()
+            .find(|rule| rule.code == canonical)
+    })
 }
 
-fn planned(code: &'static str, name: &'static str, kind: FindingKind) -> RuleMetadata {
+fn planned(
+    code: &'static str,
+    aliases: &'static [&'static str],
+    name: &'static str,
+    kind: FindingKind,
+) -> RuleMetadata {
     RuleMetadata {
         code,
+        aliases,
         name,
         kind,
         default_severity: Severity::Low,

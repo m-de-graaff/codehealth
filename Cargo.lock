@@ -244,6 +244,9 @@ dependencies = [
 name = "codehealth-config"
 version = "0.1.0"
 dependencies = [
+ "codehealth-core",
+ "codehealth-rules",
+ "globset",
  "serde",
  "thiserror",
  "toml",

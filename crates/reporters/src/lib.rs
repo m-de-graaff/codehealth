@@ -42,6 +42,10 @@ fn render_text(result: &ScanResult, use_color: bool) -> String {
         result.stats.definitions_indexed
     ));
     output.push_str(&format!("Findings: {}\n", result.findings.len()));
+    output.push_str(&format!(
+        "Suppressed findings: {}\n",
+        result.stats.suppressed_findings
+    ));
 
     if result.findings.is_empty() {
         output.push('\n');
@@ -55,9 +59,14 @@ fn render_text(result: &ScanResult, use_color: bool) -> String {
 
         for finding in findings {
             output.push_str(&format!(
-                "  {}  {}\n",
+                "  {}  {}{}\n",
                 color_severity(finding.severity, use_color),
-                finding.rule_id
+                finding.rule_id,
+                if finding.is_suppressed {
+                    "  (suppressed)"
+                } else {
+                    ""
+                }
             ));
 
             for location in &finding.locations {
@@ -74,6 +83,17 @@ fn render_text(result: &ScanResult, use_color: bool) -> String {
                 "    Autofix: {}\n",
                 autofix_text(finding.autofix, &finding.autofix_explanation)
             ));
+            if let Some(suppression) = &finding.suppression {
+                let reason = suppression.reason.as_deref().unwrap_or("missing reason");
+                output.push_str(&format!(
+                    "    Suppressed by: {}:{} ({reason})\n",
+                    format_report_path(&result.root, &suppression.path),
+                    suppression.line
+                ));
+                for warning in &suppression.warnings {
+                    output.push_str(&format!("    Suppression warning: {warning}\n"));
+                }
+            }
         }
     }
 
@@ -146,18 +166,20 @@ fn color_severity(severity: Severity, use_color: bool) -> String {
 }
 
 fn format_location(root: &Path, location: &FindingLocation) -> String {
-    let path = location
-        .path
-        .strip_prefix(root)
-        .unwrap_or(&location.path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let path = format_report_path(root, &location.path);
 
     if let Some(start) = location.start {
         format!("{path}:{}:{}", start.line, start.column)
     } else {
         path
     }
+}
+
+fn format_report_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn autofix_text(safety: AutofixSafety, explanation: &str) -> String {
@@ -368,7 +390,7 @@ mod tests {
         Finding {
             finding_id: "id".to_string(),
             baseline_key: "baseline".to_string(),
-            rule_id: "duplicate.exact_file".to_string(),
+            rule_id: "duplicate.exact.file".to_string(),
             kind: FindingKind::ExactDuplicate,
             severity: Severity::High,
             confidence: Confidence::Certain,
@@ -390,6 +412,8 @@ mod tests {
             detection_reason: "reason".to_string(),
             autofix: AutofixSafety::SuggestionOnly,
             autofix_explanation: "not safe".to_string(),
+            is_suppressed: false,
+            suppression: None,
         }
     }
 }
