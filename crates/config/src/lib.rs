@@ -49,28 +49,59 @@ detect_duplicate_routes = true
 detect_blocking_async_calls = true
 require_response_model = "warn"
 
+[scanner]
+include = []
+exclude = []
+max_file_size_bytes = 1048576
+follow_symlinks = false
+include_generated = false
+include_binary = false
+detect_javascript = true
+
 [ci]
 fail_on = ["new_high"]
 baseline = ".codehealth/baseline.json"
 
 [ignore]
 paths = [
+  ".git",
   "node_modules",
   "dist",
   "build",
+  "coverage",
   "target",
   ".venv",
+  "venv",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".next",
+  ".turbo",
 ]
 
 [rules]
+"duplicate.exact.body" = "error"
 "duplicate.exact.file" = "error"
+"duplicate.name.class" = "warn"
 "duplicate.name.function" = "warn"
+"duplicate.name.method" = "warn"
+"duplicate.name.react_component" = "warn"
+"duplicate.name.react_hook" = "warn"
+"duplicate.name.fastapi_route_handler" = "warn"
+"duplicate.name.rust_type" = "warn"
+"duplicate.name.rust_impl_method" = "warn"
 "duplicate.structural.function" = "error"
 "style.boolean_return_simplifiable" = "warn"
 "react.large.component" = "warn"
 "fastapi.duplicate.route" = "error"
 
 [rule_options."duplicate.exact.file"]
+include_paths = []
+exclude_paths = []
+
+[rule_options."duplicate.exact.body"]
+min_tokens = 40
+min_lines = 5
 include_paths = []
 exclude_paths = []
 
@@ -100,6 +131,7 @@ pub struct CodehealthConfig {
     pub style: StyleConfig,
     pub react: ReactConfig,
     pub fastapi: FastApiConfig,
+    pub scanner: ScannerConfig,
     pub ci: CiConfig,
     pub ignore: IgnoreConfig,
     pub rules: BTreeMap<String, RuleLevel>,
@@ -156,6 +188,12 @@ impl CodehealthConfig {
         validate_frameworks(&self.project.frameworks)?;
         validate_fail_on(&self.ci.fail_on)?;
         validate_response_model_level(&self.fastapi.require_response_model)?;
+        validate_patterns(&self.scanner.include, "scanner.include")?;
+        validate_patterns(&self.scanner.exclude, "scanner.exclude")?;
+        validate_positive_size(
+            self.scanner.max_file_size_bytes,
+            "scanner.max_file_size_bytes",
+        )?;
 
         self.rules = canonicalize_rule_map(&self.rules, "rules")?;
         self.rule_options = canonicalize_rule_options(&self.rule_options)?;
@@ -356,6 +394,33 @@ impl Default for FastApiConfig {
             detect_duplicate_routes: true,
             detect_blocking_async_calls: true,
             require_response_model: "warn".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct ScannerConfig {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub max_file_size_bytes: u64,
+    pub follow_symlinks: bool,
+    pub include_generated: bool,
+    pub include_binary: bool,
+    pub detect_javascript: bool,
+}
+
+impl Default for ScannerConfig {
+    fn default() -> Self {
+        Self {
+            include: Vec::new(),
+            exclude: Vec::new(),
+            max_file_size_bytes: 1024 * 1024,
+            follow_symlinks: false,
+            include_generated: false,
+            include_binary: false,
+            detect_javascript: true,
         }
     }
 }
@@ -744,6 +809,19 @@ fn validate_response_model_level(value: &str) -> Result<(), ConfigError> {
     )
 }
 
+fn validate_positive_size(value: u64, context: &str) -> Result<(), ConfigError> {
+    if value == 0 {
+        return Err(ConfigValidationError::InvalidValue {
+            context: context.to_string(),
+            value: value.to_string(),
+            expected: vec!["positive integer".to_string()],
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
 fn validate_enum_list(
     context: &str,
     values: &[String],
@@ -922,6 +1000,8 @@ mod tests {
         assert!(loaded.path.is_none());
         assert_eq!(loaded.config.report.default_format, "text");
         assert_eq!(loaded.config.project.languages.len(), 4);
+        assert_eq!(loaded.config.scanner.max_file_size_bytes, 1024 * 1024);
+        assert!(loaded.config.scanner.detect_javascript);
         assert!(loaded.config.ci.block_new_findings_only);
     }
 
@@ -977,6 +1057,23 @@ mod tests {
         let error = CodehealthConfig::from_toml_str(raw).expect_err("invalid level");
 
         assert!(error.to_string().contains("invalid rule level"));
+    }
+
+    #[test]
+    fn validates_scanner_options() {
+        let raw = r#"
+            [scanner]
+            include = ["src/**"]
+            exclude = ["target/**"]
+            max_file_size_bytes = 0
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
+
+        let error = config
+            .normalize_and_validate()
+            .expect_err("invalid scanner");
+
+        assert!(error.to_string().contains("scanner.max_file_size_bytes"));
     }
 
     #[test]

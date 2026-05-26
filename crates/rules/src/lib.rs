@@ -1,6 +1,7 @@
 use codehealth_core::{AutofixSafety, Confidence, Finding, FindingKind, Severity};
 
 pub const DUPLICATE_EXACT_FILE: &str = "duplicate.exact.file";
+pub const DUPLICATE_EXACT_BODY: &str = "duplicate.exact.body";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleMetadata {
@@ -64,12 +65,60 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             autofix: AutofixSafety::SuggestionOnly,
             autofix_explanation: "The tool cannot safely choose which file to keep or update imports automatically.",
         },
-        planned(
-            "duplicate.name.function",
-            &[],
-            "Duplicate function name",
-            FindingKind::DuplicateName,
-        ),
+        RuleMetadata {
+            code: DUPLICATE_EXACT_BODY,
+            aliases: &["duplicate.exact_body"],
+            name: "Exact duplicate body",
+            kind: FindingKind::ExactDuplicate,
+            default_severity: Severity::High,
+            default_confidence: Confidence::Certain,
+            implemented: true,
+            language: None,
+            framework: None,
+            explanation: "Finds functions, methods, components, hooks, and route handlers with identical normalized bodies.",
+            remediation: "Extract a shared helper, remove the duplicate, export an alias, or suppress intentional duplication.",
+            detection_reason: "Symbol bodies are grouped by a stable hash after comments and whitespace are normalized.",
+            autofix: AutofixSafety::SuggestionOnly,
+            autofix_explanation: "The tool cannot safely extract shared logic automatically because APIs, imports, ownership, and side effects may change.",
+        },
+        RuleMetadata {
+            code: "duplicate.name.function",
+            aliases: &[],
+            name: "Duplicate symbol name",
+            kind: FindingKind::DuplicateName,
+            default_severity: Severity::Medium,
+            default_confidence: Confidence::High,
+            implemented: true,
+            language: None,
+            framework: None,
+            explanation:
+                "Finds indexed symbols that share the same language, kind, and simple name.",
+            remediation:
+                "Rename one symbol, narrow its scope, or document why the duplicate name is intentional.",
+            detection_reason:
+                "Definitions are grouped by the language-independent symbol table.",
+            autofix: AutofixSafety::SuggestionOnly,
+            autofix_explanation:
+                "The tool cannot safely rename symbols because call sites, exports, and public APIs may need coordinated changes.",
+        },
+        duplicate_name_rule("duplicate.name.class", "Duplicate class/model name"),
+        duplicate_name_rule("duplicate.name.method", "Duplicate method name"),
+        duplicate_name_rule("duplicate.name.react_component", "Duplicate React component name")
+            .with_framework("react"),
+        duplicate_name_rule("duplicate.name.react_hook", "Duplicate React hook name")
+            .with_framework("react"),
+        duplicate_name_rule(
+            "duplicate.name.fastapi_route_handler",
+            "Duplicate FastAPI route handler name",
+        )
+        .with_framework("fastapi"),
+        duplicate_name_rule("duplicate.name.rust_type", "Duplicate Rust type name")
+            .with_language("rust"),
+        duplicate_name_rule(
+            "duplicate.name.rust_impl_method",
+            "Duplicate Rust impl method name",
+        )
+        .with_language("rust"),
         planned(
             "duplicate.structural.function",
             &["duplicate.structural_function"],
@@ -102,13 +151,22 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             FindingKind::React,
         )
         .with_framework("react"),
-        planned(
-            "fastapi.duplicate.route",
-            &["fastapi.duplicate_route"],
-            "Duplicate FastAPI route",
-            FindingKind::FastApi,
-        )
-        .with_framework("fastapi"),
+        RuleMetadata {
+            code: "fastapi.duplicate.route",
+            aliases: &["fastapi.duplicate_route"],
+            name: "Duplicate FastAPI route",
+            kind: FindingKind::FastApi,
+            default_severity: Severity::High,
+            default_confidence: Confidence::Certain,
+            implemented: true,
+            language: Some("python"),
+            framework: Some("fastapi"),
+            explanation: "Finds FastAPI route handlers that register the same HTTP method and path.",
+            remediation: "Remove one route, merge the handlers, or change one path/method combination.",
+            detection_reason: "FastAPI route metadata is grouped by HTTP method and route path.",
+            autofix: AutofixSafety::SuggestionOnly,
+            autofix_explanation: "The tool cannot safely choose which route handler should own a duplicated API path.",
+        },
         planned(
             "fastapi.blocking_call_in_async_route",
             &[],
@@ -134,6 +192,27 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
 
     rules.sort_by(|left, right| left.code.cmp(right.code));
     rules
+}
+
+fn duplicate_name_rule(code: &'static str, name: &'static str) -> RuleMetadata {
+    RuleMetadata {
+        code,
+        aliases: &[],
+        name,
+        kind: FindingKind::DuplicateName,
+        default_severity: Severity::Medium,
+        default_confidence: Confidence::High,
+        implemented: true,
+        language: None,
+        framework: None,
+        explanation: "Finds duplicate symbol names using scope, path, framework, and public API signals.",
+        remediation:
+            "Rename one symbol, narrow its scope, or suppress intentional duplication with a reason.",
+        detection_reason: "Definitions are grouped by the language-independent symbol table.",
+        autofix: AutofixSafety::SuggestionOnly,
+        autofix_explanation:
+            "The tool cannot safely rename symbols because call sites, exports, and public APIs may need coordinated changes.",
+    }
 }
 
 pub fn find_rule(code: &str) -> Option<RuleMetadata> {

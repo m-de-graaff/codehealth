@@ -22,6 +22,7 @@ codehealth-language-typescript.workspace = true
 codehealth-parser.workspace = true
 codehealth-reporters.workspace = true
 codehealth-rules.workspace = true
+codehealth-symbols.workspace = true
 codehealth-workspace.workspace = true
 miette.workspace = true
 serde_json.workspace = true

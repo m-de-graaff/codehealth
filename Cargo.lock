@@ -233,6 +233,7 @@ dependencies = [
  "codehealth-parser",
  "codehealth-reporters",
  "codehealth-rules",
+ "codehealth-symbols",
  "codehealth-workspace",
  "miette",
  "predicates",
@@ -257,6 +258,7 @@ name = "codehealth-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -265,6 +267,8 @@ name = "codehealth-duplication"
 version = "0.1.0"
 dependencies = [
  "codehealth-core",
+ "codehealth-symbols",
+ "serde_json",
  "sha2",
  "thiserror",
  "xxhash-rust",
@@ -282,6 +286,8 @@ name = "codehealth-language-python"
 version = "0.1.0"
 dependencies = [
  "codehealth-parser",
+ "codehealth-symbols",
+ "insta",
  "tree-sitter",
  "tree-sitter-python",
 ]
@@ -291,6 +297,8 @@ name = "codehealth-language-rust"
 version = "0.1.0"
 dependencies = [
  "codehealth-parser",
+ "codehealth-symbols",
+ "insta",
  "tree-sitter",
  "tree-sitter-rust",
 ]
@@ -300,6 +308,8 @@ name = "codehealth-language-typescript"
 version = "0.1.0"
 dependencies = [
  "codehealth-parser",
+ "codehealth-symbols",
+ "insta",
  "tree-sitter",
  "tree-sitter-typescript",
 ]
@@ -349,6 +359,10 @@ name = "codehealth-symbols"
 version = "0.1.0"
 dependencies = [
  "codehealth-core",
+ "codehealth-parser",
+ "insta",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -365,8 +379,12 @@ name = "codehealth-workspace"
 version = "0.1.0"
 dependencies = [
  "codehealth-parser",
+ "globset",
  "ignore",
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

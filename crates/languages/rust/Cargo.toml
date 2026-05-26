@@ -7,5 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 codehealth-parser.workspace = true
+codehealth-symbols.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

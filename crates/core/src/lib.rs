@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, fmt, path::PathBuf, str::FromStr};
+use std::{cmp::Ordering, collections::BTreeMap, fmt, path::PathBuf, str::FromStr};
 use thiserror::Error;
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
@@ -186,6 +186,8 @@ pub struct Finding {
     pub detection_reason: String,
     pub autofix: AutofixSafety,
     pub autofix_explanation: String,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, serde_json::Value>,
     pub is_suppressed: bool,
     pub suppression: Option<Suppression>,
 }
@@ -430,7 +432,13 @@ impl ScanResult {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanStats {
     pub files_scanned: usize,
+    pub files_discovered: usize,
+    pub files_skipped: usize,
+    pub config_files: usize,
+    pub files_parsed: usize,
+    pub parse_errors: usize,
     pub definitions_indexed: usize,
+    pub imports_indexed: usize,
     pub suppressed_findings: usize,
 }
 
@@ -536,6 +544,7 @@ mod tests {
             detection_reason: String::new(),
             autofix: AutofixSafety::Unavailable,
             autofix_explanation: String::new(),
+            metadata: BTreeMap::new(),
             is_suppressed: false,
             suppression: None,
         };

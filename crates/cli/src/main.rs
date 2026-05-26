@@ -9,12 +9,17 @@ use codehealth_core::{
     SuppressionKind,
 };
 use codehealth_duplication::{
-    find_exact_file_duplicates, fingerprint_normalized_body, normalize_source, DuplicateInput,
+    find_exact_body_duplicates, find_exact_file_duplicates, fingerprint_normalized_body,
+    normalize_body_source, normalize_source, token_estimate, DuplicateInput, ExactBodyOptions,
 };
-use codehealth_parser::{LanguageRegistry, ParseInput};
+use codehealth_parser::{run_query, LanguageRegistry, QueryKind, SourceFile, SyntaxTree};
 use codehealth_reporters::{render_result, ReportFormat, ReportOptions};
 use codehealth_rules::{canonical_rule_id, find_rule, rule_catalog};
-use codehealth_workspace::{discover_files, WorkspaceFile};
+use codehealth_symbols::{
+    build_symbol_index, find_duplicate_fastapi_route_findings, find_duplicate_name_findings,
+    Language as SymbolLanguage, SymbolIndex, SymbolInput, SymbolRegistry,
+};
+use codehealth_workspace::{scan_workspace, WorkspaceFile, WorkspaceScan, WorkspaceScanOptions};
 use std::{
     collections::BTreeSet,
     io::IsTerminal,
@@ -173,11 +178,30 @@ enum DebugCommand {
     Symbols(DebugFileArgs),
     Fingerprints(DebugFileArgs),
     Ast(DebugFileArgs),
+    Query(DebugQueryArgs),
+    Workspace(DebugWorkspaceArgs),
 }
 
 #[derive(Debug, Args)]
 struct DebugFileArgs {
     file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct DebugQueryArgs {
+    file: PathBuf,
+
+    #[arg(long, value_enum, default_value_t = QueryKindArg::Definitions)]
+    kind: QueryKindArg,
+}
+
+#[derive(Debug, Args)]
+struct DebugWorkspaceArgs {
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -186,6 +210,21 @@ enum OutputFormat {
     Json,
     Sarif,
     Html,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum QueryKindArg {
+    Definitions,
+    Imports,
+}
+
+impl From<QueryKindArg> for QueryKind {
+    fn from(value: QueryKindArg) -> Self {
+        match value {
+            QueryKindArg::Definitions => Self::Definitions,
+            QueryKindArg::Imports => Self::Imports,
+        }
+    }
 }
 
 impl OutputFormat {
@@ -318,11 +357,39 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
     let filters = filters_from_args(&args);
 
     let registry = build_language_registry();
-    let files =
-        discover_files(&args.path, &registry).context("failed to discover workspace files")?;
+    let workspace_scan = scan_workspace(
+        &args.path,
+        &registry,
+        workspace_options_from_config(config, &args.language),
+    )
+    .context("failed to discover workspace files")?;
     let mut result = ScanResult::new(args.path.canonicalize().unwrap_or(args.path.clone()));
-    let files = filter_files_by_config(files, &result.root, config, &args.language);
+    result.stats.files_discovered = workspace_scan.files_discovered();
+    result.stats.files_skipped = workspace_scan.skipped.len();
+    result.stats.config_files = workspace_scan.config_files.len();
+    let files = workspace_scan.files;
     result.stats.files_scanned = files.len();
+
+    let symbol_registry = build_symbol_registry();
+    let should_index_symbols = mode == ScanMode::All
+        || (config.duplication.enabled
+            && (config.duplication.detect_names
+                || config.duplication.detect_exact
+                || (config.fastapi.enabled && config.fastapi.detect_duplicate_routes)));
+    let symbol_index = if should_index_symbols {
+        let build = build_symbol_index(
+            &symbol_inputs_from_files(&files),
+            &registry,
+            &symbol_registry,
+        );
+        result.stats.files_parsed = build.files_parsed;
+        result.stats.parse_errors = build.parse_errors;
+        result.stats.definitions_indexed = build.index.definitions.len();
+        result.stats.imports_indexed = build.index.imports.len();
+        Some(build.index)
+    } else {
+        None
+    };
 
     let _accepted_but_not_active_yet = (
         args.jobs,
@@ -334,7 +401,9 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
     );
 
     let findings = match mode {
-        ScanMode::All | ScanMode::DuplicatesOnly => run_duplicate_checks(&files, config)?,
+        ScanMode::All | ScanMode::DuplicatesOnly => {
+            run_duplicate_checks(&files, config, symbol_index.as_ref())?
+        }
     };
 
     result.findings = apply_config_policy(
@@ -387,13 +456,11 @@ fn filters_from_args(args: &RunArgs) -> FindingFilters {
     }
 }
 
-fn filter_files_by_config(
-    files: Vec<WorkspaceFile>,
-    root: &Path,
+fn workspace_options_from_config(
     config: &CodehealthConfig,
     languages: &[LanguageArg],
-) -> Vec<WorkspaceFile> {
-    let effective_languages = if languages.is_empty() {
+) -> WorkspaceScanOptions {
+    let enabled_languages = if languages.is_empty() {
         config.project.languages.clone()
     } else {
         languages
@@ -402,34 +469,83 @@ fn filter_files_by_config(
             .collect()
     };
 
-    files
-        .into_iter()
-        .filter(|file| {
-            !path_matches_any(root, &file.path, &config.ignore.paths)
-                && effective_languages
-                    .iter()
-                    .any(|language| language.eq_ignore_ascii_case(file.language.name))
-        })
-        .collect()
+    WorkspaceScanOptions {
+        ignore_paths: config.ignore.paths.clone(),
+        include: config.scanner.include.clone(),
+        exclude: config.scanner.exclude.clone(),
+        max_file_size_bytes: config.scanner.max_file_size_bytes,
+        follow_symlinks: config.scanner.follow_symlinks,
+        include_generated: config.scanner.include_generated,
+        include_binary: config.scanner.include_binary,
+        detect_javascript: config.scanner.detect_javascript,
+        enabled_languages,
+    }
 }
 
 fn run_duplicate_checks(
     files: &[WorkspaceFile],
     config: &CodehealthConfig,
+    symbol_index: Option<&SymbolIndex>,
 ) -> anyhow::Result<Vec<Finding>> {
-    if !config.duplication.enabled || !config.duplication.detect_exact {
+    if !config.duplication.enabled {
         return Ok(Vec::new());
     }
 
-    let inputs = files
-        .iter()
-        .map(|file| DuplicateInput {
-            path: file.path.clone(),
-            language: file.language.name.to_string(),
-        })
-        .collect::<Vec<_>>();
+    let mut findings = Vec::new();
+    if config.duplication.detect_exact {
+        let inputs = files
+            .iter()
+            .map(|file| DuplicateInput {
+                path: file.path.clone(),
+                language: file.language.name.to_string(),
+            })
+            .collect::<Vec<_>>();
+        findings.extend(
+            find_exact_file_duplicates(&inputs).context("failed to detect exact duplicates")?,
+        );
+        if let Some(symbol_index) = symbol_index {
+            findings.extend(
+                find_exact_body_duplicates(symbol_index, exact_body_options(config))
+                    .context("failed to detect exact body duplicates")?,
+            );
+        }
+    }
 
-    find_exact_file_duplicates(&inputs).context("failed to detect exact duplicates")
+    if config.duplication.detect_names {
+        if let Some(symbol_index) = symbol_index {
+            findings.extend(find_duplicate_name_findings(symbol_index));
+        }
+    }
+
+    if config.fastapi.enabled && config.fastapi.detect_duplicate_routes {
+        if let Some(symbol_index) = symbol_index {
+            findings.extend(find_duplicate_fastapi_route_findings(symbol_index));
+        }
+    }
+
+    Ok(findings)
+}
+
+fn exact_body_options(config: &CodehealthConfig) -> ExactBodyOptions {
+    let overrides = config.rule_options_for(codehealth_duplication::EXACT_BODY_RULE);
+    ExactBodyOptions {
+        min_lines: overrides
+            .and_then(|options| options.min_lines)
+            .unwrap_or(config.duplication.min_lines),
+        min_tokens: overrides
+            .and_then(|options| options.min_tokens)
+            .unwrap_or(config.duplication.min_tokens),
+    }
+}
+
+fn symbol_inputs_from_files(files: &[WorkspaceFile]) -> Vec<SymbolInput> {
+    files
+        .iter()
+        .map(|file| SymbolInput {
+            path: file.path.clone(),
+            language: file.language,
+        })
+        .collect()
 }
 
 fn apply_config_policy(
@@ -793,14 +909,24 @@ fn run_debug(command: DebugCommand) -> anyhow::Result<u8> {
     match command {
         DebugCommand::Parse(args) => {
             let parsed = parse_debug_file(&args.file)?;
-            println!("Language: {}", parsed.language.name);
-            println!("Bytes: {}", parsed.byte_len);
-            println!("Root: {}", parsed.root_kind);
-            println!("Has errors: {}", parsed.has_error);
+            println!("Language: {}", parsed.source.language.name);
+            println!("Bytes: {}", parsed.source.byte_len());
+            println!("Root: {}", parsed.root_kind());
+            println!("Has errors: {}", parsed.has_error());
+            println!("Diagnostics: {}", parsed.diagnostics().len());
+            for diagnostic in parsed.diagnostics().iter().take(10) {
+                println!(
+                    "  {}:{}:{} {}",
+                    args.file.display(),
+                    diagnostic.span.start_position.line,
+                    diagnostic.span.start_position.column,
+                    diagnostic.message
+                );
+            }
         }
         DebugCommand::Ast(args) => {
             let parsed = parse_debug_file(&args.file)?;
-            println!("{}", parsed.sexp);
+            println!("{}", parsed.sexp());
         }
         DebugCommand::Fingerprints(args) => {
             let source = std::fs::read_to_string(&args.file)
@@ -810,34 +936,224 @@ fn run_debug(command: DebugCommand) -> anyhow::Result<u8> {
             println!("Normalized bytes: {}", normalize_source(&source).len());
             println!("Fast hash: {}", fingerprint.fast_hash);
             println!("Stable hash: {}", fingerprint.stable_hash_hex);
+            let parser_registry = build_language_registry();
+            let symbol_registry = build_symbol_registry();
+            if let Ok(tree) = parse_debug_file_with_registry(&args.file, &parser_registry) {
+                if let Some(language) = SymbolLanguage::from_info(tree.source.language) {
+                    if let Some(extractor) = symbol_registry.extractor_for_language(language) {
+                        let symbols = extractor.extract(&tree);
+                        let mut printed_header = false;
+                        for definition in symbols.definitions {
+                            let Some(body_span) = definition.body_span else {
+                                continue;
+                            };
+                            if body_span.end > source.len()
+                                || !source.is_char_boundary(body_span.start)
+                                || !source.is_char_boundary(body_span.end)
+                            {
+                                continue;
+                            }
+                            let body = &source[body_span.start..body_span.end];
+                            let normalized = normalize_body_source(body);
+                            if normalized.is_empty() {
+                                continue;
+                            }
+                            let body_fingerprint = fingerprint_normalized_body(&normalized);
+                            if !printed_header {
+                                println!("Symbol bodies:");
+                                printed_header = true;
+                            }
+                            println!(
+                                "  {}  {}  lines={}  tokens={}  hash={}",
+                                definition.kind.label(),
+                                definition.qualified_name,
+                                body.lines().count().max(1),
+                                token_estimate(&normalized),
+                                body_fingerprint.stable_hash_hex
+                            );
+                        }
+                    }
+                }
+            }
         }
         DebugCommand::Symbols(args) => {
-            let registry = build_language_registry();
-            let language = registry
-                .language_for_path(&args.file)
+            let parser_registry = build_language_registry();
+            let symbol_registry = build_symbol_registry();
+            let tree = parse_debug_file_with_registry(&args.file, &parser_registry)?;
+            let language = SymbolLanguage::from_info(tree.source.language)
                 .with_context(|| format!("unsupported source file {}", args.file.display()))?;
+            let extractor = symbol_registry
+                .extractor_for_language(language)
+                .with_context(|| {
+                    format!("no symbol extractor for {}", tree.source.language.name)
+                })?;
+            let symbols = extractor.extract(&tree);
             println!("File: {}", args.file.display());
-            println!("Language: {}", language.name);
-            println!("Symbols: 0");
+            println!("Language: {}", tree.source.language.name);
+            println!("Definitions: {}", symbols.definitions.len());
+            for definition in &symbols.definitions {
+                let tags = definition
+                    .framework_tags
+                    .iter()
+                    .map(|tag| tag.label())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "  {}  {}  {}  {}:{}{}",
+                    definition.kind.label(),
+                    definition.qualified_name,
+                    definition.visibility.label(),
+                    args.file.display(),
+                    definition.span.start_position.line,
+                    if tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  [{tags}]")
+                    }
+                );
+            }
+            println!("Imports: {}", symbols.imports.len());
+            for import in &symbols.imports {
+                println!(
+                    "  import  {}  {}:{}",
+                    import.module,
+                    args.file.display(),
+                    import.span.start_position.line
+                );
+            }
+        }
+        DebugCommand::Query(args) => {
+            let registry = build_language_registry();
+            let adapter = registry
+                .adapter_for_path(&args.file)
+                .with_context(|| format!("unsupported source file {}", args.file.display()))?;
+            let tree = parse_debug_file_with_registry(&args.file, &registry)?;
+            let kind: QueryKind = args.kind.into();
+            let spec = adapter.query_source(kind).with_context(|| {
+                format!(
+                    "no {} query for {}",
+                    kind.label(),
+                    tree.source.language.name
+                )
+            })?;
+            let language = adapter.tree_sitter_language().with_context(|| {
+                format!(
+                    "missing tree-sitter grammar for {}",
+                    tree.source.language.name
+                )
+            })?;
+            let matches = run_query(language, &tree, spec)?;
+            println!("Language: {}", tree.source.language.name);
+            println!("Query: {} v{}", kind.label(), spec.version);
+            println!("Matches: {}", matches.len());
+            for query_match in matches {
+                println!("match {}", query_match.pattern_index);
+                for capture in query_match.captures {
+                    println!(
+                        "  @{} {}:{}:{} {:?}",
+                        capture.name,
+                        args.file.display(),
+                        capture.span.start_position.line,
+                        capture.span.start_position.column,
+                        capture.text
+                    );
+                }
+            }
+        }
+        DebugCommand::Workspace(args) => {
+            let cwd = std::env::current_dir().context("failed to determine current directory")?;
+            let loaded_config = CodehealthConfig::load_with_metadata(args.config.as_deref(), &cwd)
+                .context("failed to load codehealth config")?;
+            let registry = build_language_registry();
+            let scan = scan_workspace(
+                &args.path,
+                &registry,
+                workspace_options_from_config(&loaded_config.config, &[]),
+            )
+            .context("failed to discover workspace files")?;
+            print_workspace_debug(&scan);
         }
     }
 
     Ok(0)
 }
 
-fn parse_debug_file(path: &Path) -> anyhow::Result<codehealth_parser::ParsedFile> {
+fn print_workspace_debug(scan: &WorkspaceScan) {
+    println!("Root: {}", scan.root.display());
+    println!("Files scanned: {}", scan.files.len());
+    println!("Discovery files: {}", scan.discovery_files.len());
+    println!("Config files: {}", scan.config_files.len());
+    println!("Skipped files: {}", scan.skipped.len());
+
+    let package_managers = scan
+        .metadata
+        .package_managers
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "Package managers: {}",
+        if package_managers.is_empty() {
+            "none"
+        } else {
+            &package_managers
+        }
+    );
+
+    let frameworks = scan.metadata.frameworks().join(", ");
+    println!(
+        "Frameworks: {}",
+        if frameworks.is_empty() {
+            "none"
+        } else {
+            &frameworks
+        }
+    );
+
+    if !scan.metadata.rust.workspace_members.is_empty() {
+        println!(
+            "Rust workspace members: {}",
+            scan.metadata.rust.workspace_members.join(", ")
+        );
+    }
+
+    if !scan.skipped.is_empty() {
+        println!("Skipped:");
+        for skipped in scan.skipped.iter().take(25) {
+            println!(
+                "  {} - {}",
+                format_debug_path(&scan.root, &skipped.path),
+                skipped.reason.label()
+            );
+        }
+    }
+}
+
+fn format_debug_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn parse_debug_file(path: &Path) -> anyhow::Result<SyntaxTree> {
     let registry = build_language_registry();
+    parse_debug_file_with_registry(path, &registry)
+}
+
+fn parse_debug_file_with_registry(
+    path: &Path,
+    registry: &LanguageRegistry,
+) -> anyhow::Result<SyntaxTree> {
     let adapter = registry
         .adapter_for_path(path)
         .with_context(|| format!("unsupported source file {}", path.display()))?;
-    let source = std::fs::read_to_string(path)
+    let source = SourceFile::from_path(path, adapter.info())
         .with_context(|| format!("failed to read {}", path.display()))?;
 
     adapter
-        .parse(ParseInput {
-            path,
-            source: &source,
-        })
+        .parse(&source)
         .with_context(|| format!("failed to parse {}", path.display()))
 }
 
@@ -865,6 +1181,14 @@ fn build_language_registry() -> LanguageRegistry {
     codehealth_language_typescript::register(&mut registry);
     codehealth_language_python::register(&mut registry);
     codehealth_language_rust::register(&mut registry);
+    registry
+}
+
+fn build_symbol_registry() -> SymbolRegistry {
+    let mut registry = SymbolRegistry::new();
+    codehealth_language_typescript::register_symbols(&mut registry);
+    codehealth_language_python::register_symbols(&mut registry);
+    codehealth_language_rust::register_symbols(&mut registry);
     registry
 }
 

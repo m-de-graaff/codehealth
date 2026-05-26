@@ -37,9 +37,31 @@ fn render_text(result: &ScanResult, use_color: bool) -> String {
     output.push_str("Code Health Report\n\n");
     output.push_str(&format!("Score: {}/100\n", result.score));
     output.push_str(&format!("Files scanned: {}\n", result.stats.files_scanned));
+    if result.stats.files_discovered > result.stats.files_scanned {
+        output.push_str(&format!(
+            "Files discovered: {}\n",
+            result.stats.files_discovered
+        ));
+    }
+    if result.stats.files_skipped > 0 {
+        output.push_str(&format!("Files skipped: {}\n", result.stats.files_skipped));
+    }
+    if result.stats.config_files > 0 {
+        output.push_str(&format!("Config files: {}\n", result.stats.config_files));
+    }
+    if result.stats.files_parsed > 0 {
+        output.push_str(&format!("Files parsed: {}\n", result.stats.files_parsed));
+    }
+    if result.stats.parse_errors > 0 {
+        output.push_str(&format!("Parse errors: {}\n", result.stats.parse_errors));
+    }
     output.push_str(&format!(
         "Definitions indexed: {}\n",
         result.stats.definitions_indexed
+    ));
+    output.push_str(&format!(
+        "Imports indexed: {}\n",
+        result.stats.imports_indexed
     ));
     output.push_str(&format!("Findings: {}\n", result.findings.len()));
     output.push_str(&format!(
@@ -76,6 +98,9 @@ fn render_text(result: &ScanResult, use_color: bool) -> String {
                 ));
             }
 
+            for line in metadata_lines(finding) {
+                output.push_str(&format!("    {line}\n"));
+            }
             output.push_str(&format!("    {}\n", finding.explanation));
             output.push_str(&format!("    Suggested action: {}\n", finding.remediation));
             output.push_str(&format!("    Why detected: {}\n", finding.detection_reason));
@@ -98,6 +123,84 @@ fn render_text(result: &ScanResult, use_color: bool) -> String {
     }
 
     output
+}
+
+fn metadata_lines(finding: &Finding) -> Vec<String> {
+    if finding.rule_id == "duplicate.exact.body" {
+        let body_size = metadata_usize(finding, "body_size_bytes");
+        let line_count = metadata_usize(finding, "line_count");
+        let token_estimate = metadata_usize(finding, "token_estimate");
+        let names = metadata_string_array(finding, "symbol_names");
+        let names_differ = metadata_bool(finding, "names_differ");
+        let signatures_differ = metadata_bool(finding, "signatures_differ");
+        let mut lines = Vec::new();
+        if !names.is_empty() {
+            lines.push(format!("Symbols: {}", names.join(", ")));
+        }
+        if let (Some(body_size), Some(line_count), Some(token_estimate)) =
+            (body_size, line_count, token_estimate)
+        {
+            lines.push(format!(
+                "Body: {body_size} bytes, {line_count} lines, ~{token_estimate} tokens"
+            ));
+        }
+        if let (Some(names_differ), Some(signatures_differ)) = (names_differ, signatures_differ) {
+            lines.push(format!(
+                "Names differ: {names_differ}; signatures differ: {signatures_differ}"
+            ));
+        }
+        return lines;
+    }
+
+    if finding.kind == FindingKind::DuplicateName {
+        if let (Some(scope), Some(score)) = (
+            finding
+                .metadata
+                .get("scope")
+                .and_then(|value| value.as_str()),
+            metadata_usize(finding, "score"),
+        ) {
+            return vec![format!("Scope: {scope}; duplicate-name score: {score}")];
+        }
+    }
+
+    if finding.rule_id == "fastapi.duplicate.route" {
+        if let Some(route) = finding
+            .metadata
+            .get("route")
+            .and_then(|value| value.as_str())
+        {
+            return vec![format!("Route: {route}")];
+        }
+    }
+
+    Vec::new()
+}
+
+fn metadata_usize(finding: &Finding, key: &str) -> Option<usize> {
+    finding
+        .metadata
+        .get(key)?
+        .as_u64()
+        .and_then(|value| value.try_into().ok())
+}
+
+fn metadata_bool(finding: &Finding, key: &str) -> Option<bool> {
+    finding.metadata.get(key)?.as_bool()
+}
+
+fn metadata_string_array(finding: &Finding, key: &str) -> Vec<String> {
+    finding
+        .metadata
+        .get(key)
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn grouped_findings(findings: &[Finding]) -> Vec<(&'static str, Vec<&Finding>)> {
@@ -282,6 +385,11 @@ fn render_html(result: &ScanResult) -> String {
         "Definitions indexed",
         &result.stats.definitions_indexed.to_string(),
     );
+    metric(
+        &mut output,
+        "Imports indexed",
+        &result.stats.imports_indexed.to_string(),
+    );
     metric(&mut output, "Findings", &result.findings.len().to_string());
     output.push_str("</section>");
 
@@ -412,6 +520,7 @@ mod tests {
             detection_reason: "reason".to_string(),
             autofix: AutofixSafety::SuggestionOnly,
             autofix_explanation: "not safe".to_string(),
+            metadata: Default::default(),
             is_suppressed: false,
             suppression: None,
         }
