@@ -14,15 +14,20 @@ anyhow.workspace = true
 clap.workspace = true
 codehealth-config.workspace = true
 codehealth-core.workspace = true
+codehealth-duplication.workspace = true
+codehealth-integrations.workspace = true
 codehealth-language-python.workspace = true
 codehealth-language-rust.workspace = true
 codehealth-language-typescript.workspace = true
 codehealth-parser.workspace = true
 codehealth-reporters.workspace = true
+codehealth-rules.workspace = true
 codehealth-workspace.workspace = true
 miette.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
 serde_json.workspace = true
+tempfile = "3.10"

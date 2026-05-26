@@ -11,6 +11,10 @@ impl LanguageAdapter for PythonAdapter {
             tree_sitter_grammar: "tree-sitter-python",
         }
     }
+
+    fn tree_sitter_language(&self) -> Option<tree_sitter::Language> {
+        Some(tree_sitter_python::LANGUAGE.into())
+    }
 }
 
 pub fn register(registry: &mut LanguageRegistry) {

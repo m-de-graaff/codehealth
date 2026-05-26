@@ -2,20 +2,42 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+pub const DEFAULT_CONFIG_FILE: &str = "codehealth.toml";
+
+pub fn default_config_toml() -> &'static str {
+    r#"# codehealth configuration
+
+[scan]
+include_extensions = []
+follow_symlinks = false
+
+[ci]
+baseline = ".codehealth/baseline.json"
+block_new_findings_only = true
+
+[report]
+default_format = "text"
+color = "auto"
+
+[cache]
+enabled = true
+dir = ".codehealth/cache"
+"#
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct CodehealthConfig {
     pub scan: ScanConfig,
     pub ci: CiConfig,
     pub report: ReportConfig,
+    pub cache: CacheConfig,
 }
 
 impl CodehealthConfig {
     pub fn load(path: Option<&Path>, cwd: &Path) -> Result<Self, ConfigError> {
-        let config_path = match path {
-            Some(path) => path.to_path_buf(),
-            None => cwd.join("codehealth.toml"),
-        };
+        let config_path = config_path(path, cwd);
 
         if path.is_none() && !config_path.exists() {
             return Ok(Self::default());
@@ -32,13 +54,25 @@ impl CodehealthConfig {
         })
     }
 
+    pub fn validate_path(path: &Path) -> Result<Self, ConfigError> {
+        Self::load(Some(path), Path::new("."))
+    }
+
     pub fn from_toml_str(raw: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(raw)
     }
 }
 
+pub fn config_path(path: Option<&Path>, cwd: &Path) -> PathBuf {
+    match path {
+        Some(path) => path.to_path_buf(),
+        None => cwd.join(DEFAULT_CONFIG_FILE),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct ScanConfig {
     pub include_extensions: Vec<String>,
     pub follow_symlinks: bool,
@@ -46,6 +80,7 @@ pub struct ScanConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct CiConfig {
     pub baseline: Option<PathBuf>,
     pub block_new_findings_only: bool,
@@ -54,7 +89,7 @@ pub struct CiConfig {
 impl Default for CiConfig {
     fn default() -> Self {
         Self {
-            baseline: None,
+            baseline: Some(PathBuf::from(".codehealth/baseline.json")),
             block_new_findings_only: true,
         }
     }
@@ -62,14 +97,34 @@ impl Default for CiConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct ReportConfig {
     pub default_format: String,
+    pub color: String,
 }
 
 impl Default for ReportConfig {
     fn default() -> Self {
         Self {
             default_format: "text".to_string(),
+            color: "auto".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    pub enabled: bool,
+    pub dir: PathBuf,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: PathBuf::from(".codehealth/cache"),
         }
     }
 }
@@ -102,6 +157,10 @@ mod tests {
 
         assert_eq!(config.report.default_format, "text");
         assert!(config.ci.block_new_findings_only);
+        assert_eq!(
+            config.ci.baseline,
+            Some(PathBuf::from(".codehealth/baseline.json"))
+        );
     }
 
     #[test]
@@ -114,6 +173,14 @@ mod tests {
         let config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
 
         assert_eq!(config.report.default_format, "json");
+        assert_eq!(config.report.color, "auto");
         assert!(!config.scan.follow_symlinks);
+    }
+
+    #[test]
+    fn rejects_unknown_fields() {
+        let raw = "unknown = true";
+
+        assert!(CodehealthConfig::from_toml_str(raw).is_err());
     }
 }

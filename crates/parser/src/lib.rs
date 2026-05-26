@@ -11,6 +11,10 @@ pub struct LanguageInfo {
 pub trait LanguageAdapter: Send + Sync {
     fn info(&self) -> LanguageInfo;
 
+    fn tree_sitter_language(&self) -> Option<tree_sitter::Language> {
+        None
+    }
+
     fn supports_extension(&self, extension: &str) -> bool {
         let extension = extension.trim_start_matches('.');
         self.info()
@@ -20,9 +24,31 @@ pub trait LanguageAdapter: Send + Sync {
     }
 
     fn parse(&self, input: ParseInput<'_>) -> Result<ParsedFile, ParseError> {
+        let language = self
+            .tree_sitter_language()
+            .ok_or(ParseError::MissingGrammar {
+                language: self.info().name.to_string(),
+            })?;
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language)
+            .map_err(|source| ParseError::SetLanguage {
+                language: self.info().name.to_string(),
+                source,
+            })?;
+        let tree = parser
+            .parse(input.source, None)
+            .ok_or(ParseError::ParseFailed {
+                path: input.path.display().to_string(),
+            })?;
+        let root = tree.root_node();
+
         Ok(ParsedFile {
             language: self.info(),
             byte_len: input.source.len(),
+            root_kind: root.kind().to_string(),
+            has_error: root.has_error(),
+            sexp: root.to_sexp(),
         })
     }
 }
@@ -33,10 +59,13 @@ pub struct ParseInput<'a> {
     pub source: &'a str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFile {
     pub language: LanguageInfo,
     pub byte_len: usize,
+    pub root_kind: String,
+    pub has_error: bool,
+    pub sexp: String,
 }
 
 #[derive(Default)]
@@ -87,10 +116,23 @@ pub fn empty_tree_sitter_parser() -> tree_sitter::Parser {
     tree_sitter::Parser::new()
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum ParseError {
     #[error("unsupported language for {path}")]
     UnsupportedLanguage { path: String },
+
+    #[error("missing tree-sitter grammar for {language}")]
+    MissingGrammar { language: String },
+
+    #[error("failed to set tree-sitter language for {language}")]
+    SetLanguage {
+        language: String,
+        #[source]
+        source: tree_sitter::LanguageError,
+    },
+
+    #[error("failed to parse {path}")]
+    ParseFailed { path: String },
 }
 
 #[cfg(test)]

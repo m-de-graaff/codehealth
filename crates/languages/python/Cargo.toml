@@ -7,3 +7,5 @@ rust-version.workspace = true
 
 [dependencies]
 codehealth-parser.workspace = true
+tree-sitter.workspace = true
+tree-sitter-python.workspace = true

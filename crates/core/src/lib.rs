@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{cmp::Ordering, fmt, path::PathBuf, str::FromStr};
 use thiserror::Error;
+
+pub const REPORT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -13,9 +15,71 @@ pub enum Severity {
 }
 
 impl Severity {
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Info => 0,
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Critical => 4,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Low => "LOW",
+            Self::Medium => "MEDIUM",
+            Self::High => "HIGH",
+            Self::Critical => "CRITICAL",
+        }
+    }
+
     pub fn blocks_by_default(self, confidence: Confidence) -> bool {
         matches!(self, Self::High | Self::Critical)
             && matches!(confidence, Confidence::High | Confidence::Certain)
+    }
+}
+
+impl PartialOrd for Severity {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Severity {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Info => "info",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        })
+    }
+}
+
+impl FromStr for Severity {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "info" => Ok(Self::Info),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "critical" => Ok(Self::Critical),
+            _ => Err(ParseEnumError {
+                enum_name: "severity",
+                value: value.to_string(),
+            }),
+        }
     }
 }
 
@@ -26,6 +90,61 @@ pub enum Confidence {
     Medium,
     High,
     Certain,
+}
+
+impl Confidence {
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::Certain => 3,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Certain => "certain",
+        }
+    }
+}
+
+impl PartialOrd for Confidence {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Confidence {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl fmt::Display for Confidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+impl FromStr for Confidence {
+    type Err = ParseEnumError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "certain" => Ok(Self::Certain),
+            _ => Err(ParseEnumError {
+                enum_name: "confidence",
+                value: value.to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,20 +171,39 @@ pub enum FindingKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
+    pub finding_id: String,
+    pub baseline_key: String,
     pub rule_id: String,
     pub kind: FindingKind,
     pub severity: Severity,
     pub confidence: Confidence,
     pub message: String,
-    pub path: Option<PathBuf>,
-    pub span: Option<SourceSpan>,
+    pub locations: Vec<FindingLocation>,
+    pub language: Option<String>,
+    pub framework: Option<String>,
+    pub explanation: String,
+    pub remediation: String,
+    pub detection_reason: String,
     pub autofix: AutofixSafety,
+    pub autofix_explanation: String,
 }
 
 impl Finding {
     pub fn blocks_by_default(&self) -> bool {
         self.severity.blocks_by_default(self.confidence)
     }
+
+    pub fn primary_location(&self) -> Option<&FindingLocation> {
+        self.locations.first()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingLocation {
+    pub path: PathBuf,
+    pub span: Option<SourceSpan>,
+    pub start: Option<Location>,
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,27 +304,163 @@ pub fn slice_source(source: &str, span: SourceSpan) -> Result<&str, SourceError>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanRequest {
     pub root: PathBuf,
+    pub mode: ScanMode,
+    pub filters: FindingFilters,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanMode {
+    All,
+    DuplicatesOnly,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingFilters {
+    pub min_severity: Option<Severity>,
+    pub only_severity: Option<Severity>,
+    pub min_confidence: Option<Confidence>,
+    pub languages: Vec<String>,
+    pub frameworks: Vec<String>,
+}
+
+impl FindingFilters {
+    pub fn allows(&self, finding: &Finding) -> bool {
+        if let Some(minimum) = self.min_severity {
+            if finding.severity < minimum {
+                return false;
+            }
+        }
+
+        if let Some(only) = self.only_severity {
+            if finding.severity != only {
+                return false;
+            }
+        }
+
+        if let Some(minimum) = self.min_confidence {
+            if finding.confidence < minimum {
+                return false;
+            }
+        }
+
+        if !self.languages.is_empty() && !finding_matches_language(finding, &self.languages) {
+            return false;
+        }
+
+        if !self.frameworks.is_empty() {
+            if let Some(framework) = &finding.framework {
+                return self
+                    .frameworks
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(framework));
+            }
+        }
+
+        true
+    }
+}
+
+fn finding_matches_language(finding: &Finding, languages: &[String]) -> bool {
+    if let Some(language) = &finding.language {
+        return languages
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(language));
+    }
+
+    finding.locations.iter().any(|location| {
+        location.language.as_ref().is_some_and(|language| {
+            languages
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(language))
+        })
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanResult {
+    pub schema_version: u32,
     pub root: PathBuf,
-    pub files_scanned: usize,
+    pub score: u8,
+    pub stats: ScanStats,
     pub findings: Vec<Finding>,
 }
 
 impl ScanResult {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
+            schema_version: REPORT_SCHEMA_VERSION,
             root: root.into(),
-            files_scanned: 0,
+            score: 100,
+            stats: ScanStats::default(),
             findings: Vec::new(),
         }
+    }
+
+    pub fn finalize(mut self) -> Self {
+        sort_findings(&mut self.findings);
+        self.score = calculate_score(&self.findings);
+        self
     }
 
     pub fn has_blocking_findings(&self) -> bool {
         self.findings.iter().any(Finding::blocks_by_default)
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanStats {
+    pub files_scanned: usize,
+    pub definitions_indexed: usize,
+}
+
+pub fn sort_findings(findings: &mut [Finding]) {
+    findings.sort_by(|left, right| {
+        right
+            .severity
+            .cmp(&left.severity)
+            .then_with(|| primary_path(left).cmp(&primary_path(right)))
+            .then_with(|| primary_span_start(left).cmp(&primary_span_start(right)))
+            .then_with(|| left.rule_id.cmp(&right.rule_id))
+            .then_with(|| left.finding_id.cmp(&right.finding_id))
+    });
+}
+
+fn primary_path(finding: &Finding) -> PathBuf {
+    finding
+        .primary_location()
+        .map(|location| location.path.clone())
+        .unwrap_or_default()
+}
+
+fn primary_span_start(finding: &Finding) -> usize {
+    finding
+        .primary_location()
+        .and_then(|location| location.span)
+        .map(|span| span.start)
+        .unwrap_or_default()
+}
+
+pub fn calculate_score(findings: &[Finding]) -> u8 {
+    let penalty: u16 = findings
+        .iter()
+        .map(|finding| match finding.severity {
+            Severity::Info => 0,
+            Severity::Low => 1,
+            Severity::Medium => 3,
+            Severity::High => 8,
+            Severity::Critical => 15,
+        })
+        .sum();
+
+    100_u16.saturating_sub(penalty).try_into().unwrap_or(0)
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid {enum_name} value: {value}")]
+pub struct ParseEnumError {
+    pub enum_name: &'static str,
+    pub value: String,
 }
 
 #[cfg(test)]
@@ -204,7 +478,7 @@ mod tests {
     #[test]
     fn line_column_counts_utf8_characters() {
         let source = "a\nbete\nc";
-        let offset = source.find("c").expect("fixture contains c");
+        let offset = source.find('c').expect("fixture contains c");
         let location = line_column_for_offset(source, offset).expect("valid offset");
 
         assert_eq!(location.line, 3);
@@ -221,5 +495,28 @@ mod tests {
             slice_source(&source, span),
             Err(SourceError::InvalidUtf8Boundary { offset: 1 })
         ));
+    }
+
+    #[test]
+    fn score_applies_deterministic_penalty() {
+        let finding = Finding {
+            finding_id: "one".to_string(),
+            baseline_key: "one".to_string(),
+            rule_id: "duplicate.exact_file".to_string(),
+            kind: FindingKind::ExactDuplicate,
+            severity: Severity::High,
+            confidence: Confidence::Certain,
+            message: "duplicate".to_string(),
+            locations: Vec::new(),
+            language: None,
+            framework: None,
+            explanation: String::new(),
+            remediation: String::new(),
+            detection_reason: String::new(),
+            autofix: AutofixSafety::Unavailable,
+            autofix_explanation: String::new(),
+        };
+
+        assert_eq!(calculate_score(&[finding]), 92);
     }
 }

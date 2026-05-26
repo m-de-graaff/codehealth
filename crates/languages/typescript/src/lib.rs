@@ -11,6 +11,10 @@ impl LanguageAdapter for TypeScriptAdapter {
             tree_sitter_grammar: "tree-sitter-typescript/typescript",
         }
     }
+
+    fn tree_sitter_language(&self) -> Option<tree_sitter::Language> {
+        Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -23,6 +27,10 @@ impl LanguageAdapter for TsxAdapter {
             extensions: &["tsx"],
             tree_sitter_grammar: "tree-sitter-typescript/tsx",
         }
+    }
+
+    fn tree_sitter_language(&self) -> Option<tree_sitter::Language> {
+        Some(tree_sitter_typescript::LANGUAGE_TSX.into())
     }
 }
 

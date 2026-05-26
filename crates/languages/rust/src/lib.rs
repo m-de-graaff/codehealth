@@ -11,6 +11,10 @@ impl LanguageAdapter for RustAdapter {
             tree_sitter_grammar: "tree-sitter-rust",
         }
     }
+
+    fn tree_sitter_language(&self) -> Option<tree_sitter::Language> {
+        Some(tree_sitter_rust::LANGUAGE.into())
+    }
 }
 
 pub fn register(registry: &mut LanguageRegistry) {
