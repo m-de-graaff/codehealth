@@ -794,6 +794,7 @@ fn duplicate_name_finding(
         autofix_explanation:
             "Renaming symbols is not auto-fixed because call sites, exports, and public APIs may need coordinated changes."
                 .to_string(),
+        fixes: Vec::new(),
         metadata,
         is_suppressed: false,
         suppression: None,
@@ -858,6 +859,7 @@ fn duplicate_fastapi_route_finding(route: &str, definitions: &[&Definition]) -> 
         autofix_explanation:
             "Duplicate routes are not auto-fixed because choosing which handler should own an API path is a product decision."
                 .to_string(),
+        fixes: Vec::new(),
         metadata,
         is_suppressed: false,
         suppression: None,

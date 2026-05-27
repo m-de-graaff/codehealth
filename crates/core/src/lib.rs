@@ -163,6 +163,29 @@ pub enum AutofixSafety {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum FixApplicability {
+    MachineApplicable,
+    MaybeIncorrect,
+    SuggestionOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edit {
+    pub file: PathBuf,
+    pub span: SourceSpan,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fix {
+    pub title: String,
+    pub safety: AutofixSafety,
+    pub applicability: FixApplicability,
+    pub edits: Vec<Edit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     DuplicateName,
     ExactDuplicate,
@@ -192,6 +215,8 @@ pub struct Finding {
     pub detection_reason: String,
     pub autofix: AutofixSafety,
     pub autofix_explanation: String,
+    #[serde(default)]
+    pub fixes: Vec<Fix>,
     #[serde(default)]
     pub metadata: BTreeMap<String, serde_json::Value>,
     pub is_suppressed: bool,
@@ -1180,6 +1205,7 @@ mod tests {
             detection_reason: String::new(),
             autofix: AutofixSafety::Unavailable,
             autofix_explanation: String::new(),
+            fixes: Vec::new(),
             metadata: BTreeMap::new(),
             is_suppressed: false,
             suppression: None,

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+codehealth-autofix.workspace = true
 codehealth-config.workspace = true
 codehealth-core.workspace = true
 codehealth-duplication.workspace = true

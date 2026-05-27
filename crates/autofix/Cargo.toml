@@ -7,3 +7,5 @@ rust-version.workspace = true
 
 [dependencies]
 codehealth-core.workspace = true
+codehealth-parser.workspace = true
+thiserror.workspace = true

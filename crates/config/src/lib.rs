@@ -96,6 +96,20 @@ paths = [
 "duplicate.name.rust_impl_method" = "warn"
 "duplicate.structural.function" = "warn"
 "style.boolean_return_simplifiable" = "warn"
+"style.expression_arrow_simplifiable" = "warn"
+"style.unnecessary_else_after_return" = "info"
+"style.nested_conditional" = "info"
+"style.guard_clause" = "info"
+"style.duplicated_literal" = "info"
+"style.large_function" = "warn"
+"style.high_parameter_count" = "warn"
+"style.complex_condition" = "info"
+"python.broad_exception" = "warn"
+"python.repeated_validation_logic" = "info"
+"python.duplicated_route_handler_business_logic" = "warn"
+"rust.duplicate_match_arm_body" = "info"
+"rust.repeated_unwrap_policy" = "warn"
+"rust.manual_result_option_pattern" = "info"
 "react.large.component" = "warn"
 "fastapi.duplicate.route" = "error"
 
@@ -112,6 +126,31 @@ exclude_paths = []
 [rule_options."duplicate.structural.function"]
 min_tokens = 5
 min_lines = 1
+include_paths = []
+exclude_paths = []
+
+[rule_options."style.large_function"]
+max_lines = 80
+include_paths = []
+exclude_paths = []
+
+[rule_options."style.high_parameter_count"]
+max_params = 6
+include_paths = []
+exclude_paths = []
+
+[rule_options."style.complex_condition"]
+max_condition_terms = 3
+include_paths = []
+exclude_paths = []
+
+[rule_options."style.duplicated_literal"]
+max_literal_occurrences = 3
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.repeated_unwrap_policy"]
+max_unwraps = 2
 include_paths = []
 exclude_paths = []
 
@@ -485,6 +524,11 @@ pub struct RuleOptions {
     pub min_tokens: Option<usize>,
     pub min_lines: Option<usize>,
     pub min_confidence: Option<Confidence>,
+    pub max_lines: Option<usize>,
+    pub max_params: Option<usize>,
+    pub max_condition_terms: Option<usize>,
+    pub max_literal_occurrences: Option<usize>,
+    pub max_unwraps: Option<usize>,
     pub include_paths: Vec<String>,
     pub exclude_paths: Vec<String>,
 }

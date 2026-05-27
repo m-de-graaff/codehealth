@@ -1,6 +1,6 @@
 use codehealth_core::{
     line_column_for_offset, slice_source, AutofixSafety, BaselineStatus, Finding, FindingKind,
-    FindingLocation, ScanResult, ScoreCategoryScore, Severity, SourceSpan,
+    FindingLocation, Fix, FixApplicability, ScanResult, ScoreCategoryScore, Severity, SourceSpan,
 };
 use codehealth_rules::rule_catalog;
 use serde::Serialize;
@@ -297,6 +297,7 @@ struct FindingReport {
     detection_reason: String,
     autofix: String,
     autofix_explanation: String,
+    fixes: Vec<FixReport>,
     metadata: BTreeMap<String, Value>,
     is_suppressed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -323,6 +324,24 @@ struct LocationReport {
     language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snippet: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FixReport {
+    title: String,
+    safety: String,
+    applicability: String,
+    edits: Vec<EditReport>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditReport {
+    file: String,
+    byte_start: usize,
+    byte_end: usize,
+    replacement: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -537,6 +556,11 @@ fn finding_report(
         detection_reason: finding.detection_reason.clone(),
         autofix: autofix_value(finding.autofix).to_string(),
         autofix_explanation: finding.autofix_explanation.clone(),
+        fixes: finding
+            .fixes
+            .iter()
+            .map(|fix| fix_report(result, fix))
+            .collect(),
         metadata: finding.metadata.clone(),
         is_suppressed: finding.is_suppressed,
         suppression: finding
@@ -587,6 +611,24 @@ fn location_report(
         snippet: include_snippet
             .then(|| source_snippet(source.as_deref(), location.span))
             .flatten(),
+    }
+}
+
+fn fix_report(result: &ScanResult, fix: &Fix) -> FixReport {
+    FixReport {
+        title: fix.title.clone(),
+        safety: autofix_value(fix.safety).to_string(),
+        applicability: applicability_value(fix.applicability).to_string(),
+        edits: fix
+            .edits
+            .iter()
+            .map(|edit| EditReport {
+                file: format_report_path(&result.root, &edit.file),
+                byte_start: edit.span.start,
+                byte_end: edit.span.end,
+                replacement: edit.replacement.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -887,6 +929,16 @@ fn push_text_finding(
         "    Autofix: {}\n",
         autofix_text(finding.autofix, &finding.autofix_explanation)
     ));
+    if !finding.fixes.is_empty() {
+        for fix in &finding.fixes {
+            output.push_str(&format!(
+                "    Fix: {} ({} edits, {})\n",
+                fix.title,
+                fix.edits.len(),
+                autofix_value(fix.safety)
+            ));
+        }
+    }
     if let Some(suppression) = &finding.suppression {
         let reason = suppression.reason.as_deref().unwrap_or("missing reason");
         output.push_str(&format!(
@@ -1284,8 +1336,58 @@ fn sarif_result(result: &ScanResult, finding: &Finding, context: &ReportContext)
     if !related_locations.is_empty() {
         object.insert("relatedLocations".to_string(), json!(related_locations));
     }
+    let fixes = sarif_fixes(&result.root, finding);
+    if !fixes.is_empty() {
+        object.insert("fixes".to_string(), json!(fixes));
+    }
 
     Value::Object(object)
+}
+
+fn sarif_fixes(root: &Path, finding: &Finding) -> Vec<Value> {
+    finding
+        .fixes
+        .iter()
+        .filter(|fix| fix.safety == AutofixSafety::Safe)
+        .map(|fix| {
+            let mut changes: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+            for edit in &fix.edits {
+                let source = std::fs::read_to_string(&edit.file).unwrap_or_default();
+                let start = line_column_for_offset(&source, edit.span.start).ok();
+                let end = line_column_for_offset(&source, edit.span.end).ok();
+                changes
+                    .entry(format_report_path(root, &edit.file))
+                    .or_default()
+                    .push(json!({
+                        "deletedRegion": {
+                            "startLine": start.map(|location| location.line).unwrap_or(1),
+                            "startColumn": start.map(|location| location.column).unwrap_or(1),
+                            "endLine": end.map(|location| location.line).unwrap_or(1),
+                            "endColumn": end.map(|location| location.column).unwrap_or(1),
+                        },
+                        "insertedContent": {
+                            "text": &edit.replacement,
+                        }
+                    }));
+            }
+            let artifact_changes = changes
+                .into_iter()
+                .map(|(uri, replacements)| {
+                    json!({
+                        "artifactLocation": {
+                            "uri": uri,
+                            "uriBaseId": "SRCROOT",
+                        },
+                        "replacements": replacements,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "description": { "text": &fix.title },
+                "artifactChanges": artifact_changes,
+            })
+        })
+        .collect()
 }
 
 fn sarif_location(root: &Path, location: &FindingLocation) -> Value {
@@ -1662,6 +1764,14 @@ fn autofix_value(safety: AutofixSafety) -> &'static str {
     }
 }
 
+fn applicability_value(applicability: FixApplicability) -> &'static str {
+    match applicability {
+        FixApplicability::MachineApplicable => "machine_applicable",
+        FixApplicability::MaybeIncorrect => "maybe_incorrect",
+        FixApplicability::SuggestionOnly => "suggestion_only",
+    }
+}
+
 fn duplicate_group_key(finding: &Finding) -> Option<String> {
     if !is_duplicate_finding(finding) && finding.locations.len() <= 1 {
         return None;
@@ -1817,6 +1927,7 @@ mod tests {
             detection_reason: "reason".to_string(),
             autofix: AutofixSafety::SuggestionOnly,
             autofix_explanation: "not safe".to_string(),
+            fixes: Vec::new(),
             metadata: Default::default(),
             is_suppressed: false,
             suppression: None,

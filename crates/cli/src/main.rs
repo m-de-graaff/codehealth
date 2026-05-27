@@ -1,5 +1,6 @@
 use anyhow::{bail, Context};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use codehealth_autofix::apply_safe_fixes;
 use codehealth_config::{
     config_path, default_config_toml, parse_suppressions, path_matches_any, CodehealthConfig,
     LoadedConfig, SuppressionDirective, DEFAULT_CONFIG_FILE,
@@ -18,7 +19,10 @@ use codehealth_parser::{run_query, LanguageRegistry, QueryKind, SourceFile, Synt
 use codehealth_reporters::{
     render_result_with_context, ReportContext, ReportFormat, ReportOptions, ReportTiming,
 };
-use codehealth_rules::{canonical_rule_id, find_rule, rule_catalog};
+use codehealth_rules::{
+    canonical_rule_id, find_rule, rule_catalog, RuleContext, RuleExecutionConfig,
+    RuleOptionSettings, RuleRegistry as StyleRuleRegistry,
+};
 use codehealth_symbols::{
     build_symbol_index, find_duplicate_fastapi_route_findings, find_duplicate_name_findings,
     Definition, DefinitionKind, Language as SymbolLanguage, SymbolIndex, SymbolInput,
@@ -428,6 +432,7 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
     result.stats.files_discovered = workspace_scan.files_discovered();
     result.stats.files_skipped = workspace_scan.skipped.len();
     result.stats.config_files = workspace_scan.config_files.len();
+    let workspace_frameworks = workspace_scan.metadata.frameworks();
     let files = workspace_scan.files;
     result.stats.files_scanned = files.len();
     let generated_paths = generated_source_paths(&files);
@@ -454,23 +459,26 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
         None
     };
 
-    let _accepted_but_not_active_yet = (
-        args.jobs,
-        args.no_cache,
-        &args.cache_dir,
-        args.fix,
-        args.fix_safe,
-        args.dry_run,
-    );
+    let _accepted_but_not_active_yet = (args.jobs, args.no_cache, &args.cache_dir);
 
-    let findings = match mode {
+    let mut findings = match mode {
         ScanMode::All | ScanMode::DuplicatesOnly => {
             run_duplicate_checks(&files, config, symbol_index.as_ref())?
         }
     };
+    if mode == ScanMode::All {
+        findings.extend(run_style_checks(
+            &files,
+            config,
+            symbol_index.as_ref(),
+            &registry,
+            &result.root,
+            &workspace_frameworks,
+        )?);
+    }
 
     let mut suppressed_rule_counts = BTreeMap::new();
-    result.findings = apply_config_policy(
+    let policy_findings = apply_config_policy(
         findings,
         &result.root,
         config,
@@ -478,10 +486,28 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
         args.show_suppressed,
         &mut result.stats.suppressed_findings,
         &mut suppressed_rule_counts,
-    )?
-    .into_iter()
-    .filter(|finding| filters.allows(finding))
-    .collect();
+    )?;
+    if args.fix || args.fix_safe {
+        let summary = apply_safe_fixes(&policy_findings, &registry, args.dry_run)
+            .context("failed to apply safe autofixes")?;
+        if summary.planned_edits > 0 {
+            if summary.dry_run {
+                eprintln!(
+                    "Would apply {} safe edits across {} files.",
+                    summary.planned_edits, summary.files_touched
+                );
+            } else {
+                eprintln!(
+                    "Applied {} safe edits across {} files.",
+                    summary.applied_edits, summary.files_touched
+                );
+            }
+        }
+    }
+    result.findings = policy_findings
+        .into_iter()
+        .filter(|finding| filters.allows(finding))
+        .collect();
     let baseline_path = effective_baseline_path(args.baseline.as_ref(), config, ci_mode);
     let baseline_owner = args
         .baseline_owner
@@ -679,6 +705,87 @@ fn run_duplicate_checks(
     }
 
     Ok(findings)
+}
+
+fn run_style_checks(
+    files: &[WorkspaceFile],
+    config: &CodehealthConfig,
+    symbol_index: Option<&SymbolIndex>,
+    parser_registry: &LanguageRegistry,
+    root: &Path,
+    workspace_frameworks: &[&str],
+) -> anyhow::Result<Vec<Finding>> {
+    let registry = StyleRuleRegistry::with_builtin_rules();
+    let mut findings = Vec::new();
+
+    for file in files {
+        let Some(parser) = parser_registry.adapter_for_path(&file.path) else {
+            continue;
+        };
+        let source = match SourceFile::from_path(&file.path, file.language) {
+            Ok(source) => source,
+            Err(_) => continue,
+        };
+        let tree = match parser.parse(&source) {
+            Ok(tree) => tree,
+            Err(_) => continue,
+        };
+        if tree.has_error() {
+            continue;
+        }
+
+        let rule_config = rule_execution_config_for_file(config, root, &file.path);
+        let context = RuleContext {
+            root,
+            source_file: &tree.source,
+            tree: &tree,
+            symbols: symbol_index,
+            config: &rule_config,
+            workspace_frameworks,
+        };
+        findings.extend(registry.run(&context));
+    }
+
+    Ok(findings)
+}
+
+fn rule_execution_config_for_file(
+    config: &CodehealthConfig,
+    root: &Path,
+    path: &Path,
+) -> RuleExecutionConfig {
+    let paths = vec![path.to_path_buf()];
+    let disabled_rules = rule_catalog()
+        .into_iter()
+        .filter(|rule| config.level_for_rule(rule.code, root, &paths).is_off())
+        .map(|rule| rule.code.to_string())
+        .collect();
+    let options = config
+        .rule_options
+        .iter()
+        .map(|(rule_id, options)| (rule_id.clone(), rule_option_settings(options)))
+        .collect();
+
+    RuleExecutionConfig {
+        simplify_boolean_returns: config.style.simplify_boolean_returns,
+        prefer_expression_arrows: config.style.prefer_expression_arrows,
+        prefer_guard_clauses: config.style.prefer_guard_clauses,
+        disabled_rules,
+        options,
+    }
+}
+
+fn rule_option_settings(options: &codehealth_config::RuleOptions) -> RuleOptionSettings {
+    RuleOptionSettings {
+        min_tokens: options.min_tokens,
+        min_lines: options.min_lines,
+        min_confidence: options.min_confidence,
+        max_lines: options.max_lines,
+        max_params: options.max_params,
+        max_condition_terms: options.max_condition_terms,
+        max_literal_occurrences: options.max_literal_occurrences,
+        max_unwraps: options.max_unwraps,
+    }
 }
 
 fn exact_body_options(config: &CodehealthConfig) -> ExactBodyOptions {

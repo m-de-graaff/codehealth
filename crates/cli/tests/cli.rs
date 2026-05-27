@@ -455,6 +455,288 @@ fn severity_filter_can_hide_duplicate_findings() {
 }
 
 #[test]
+fn style_safe_autofix_dry_run_does_not_write() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("vote.ts");
+    let before = r#"
+function canVote(person) {
+  if (person.age >= 18) return true;
+  return false;
+}
+"#;
+    std::fs::write(&file, before).expect("write ts");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--fix-safe")
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stderr(contains("Would apply 1 safe edits"));
+
+    assert_eq!(std::fs::read_to_string(file).expect("read ts"), before);
+}
+
+#[test]
+fn style_safe_autofix_rewrites_typescript_boolean_and_arrow() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("vote.ts");
+    std::fs::write(
+        &file,
+        r#"
+function canVote(person) {
+  if (person.age >= 18) return true;
+  return false;
+}
+
+const isAdult = (user) => {
+  return user.age >= 18;
+};
+"#,
+    )
+    .expect("write ts");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--fix-safe")
+        .assert()
+        .success()
+        .stderr(contains("Applied 2 safe edits"));
+
+    let after = std::fs::read_to_string(file).expect("read ts");
+    assert!(after.contains("return person.age >= 18;"));
+    assert!(after.contains("const isAdult = (user) => user.age >= 18;"));
+    assert!(!after.contains("return false;"));
+}
+
+#[test]
+fn style_safe_autofix_rewrites_python_and_rust_boolean_returns() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let python = temp.path().join("policy.py");
+    let rust = temp.path().join("lib.rs");
+    std::fs::write(
+        &python,
+        r#"
+def is_adult(user):
+    if user.age >= 18:
+        return True
+    return False
+"#,
+    )
+    .expect("write python");
+    std::fs::write(
+        &rust,
+        r#"
+fn is_adult(user: User) -> bool {
+    if user.age >= 18 {
+        true
+    } else {
+        false
+    }
+}
+"#,
+    )
+    .expect("write rust");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--fix-safe")
+        .assert()
+        .success()
+        .stderr(contains("Applied 2 safe edits"));
+
+    assert!(std::fs::read_to_string(python)
+        .expect("read python")
+        .contains("return user.age >= 18"));
+    assert!(std::fs::read_to_string(rust)
+        .expect("read rust")
+        .contains("user.age >= 18"));
+}
+
+#[test]
+fn style_json_report_includes_fix_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("vote.ts"),
+        "function canVote(person) {\n  if (person.age >= 18) return true;\n  return false;\n}\n",
+    )
+    .expect("write ts");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
+    let finding = json["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|finding| finding["ruleId"] == "style.boolean_return_simplifiable")
+        .expect("style finding");
+
+    assert_eq!(finding["autofix"], "safe");
+    assert_eq!(finding["fixes"][0]["applicability"], "machine_applicable");
+    assert_eq!(
+        finding["fixes"][0]["edits"][0]["replacement"],
+        "  return person.age >= 18;"
+    );
+}
+
+#[test]
+fn typescript_style_suggestion_rules_are_reported() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("style.ts"),
+        r#"
+function branch(a, b, c, d) {
+  if (a) { return 1; } else { return 2; }
+  if (a && b && c && d) {
+    if (b) return 3;
+  }
+  const one = "shared-literal";
+  const two = "shared-literal";
+  const three = "shared-literal";
+  const four = "shared-literal";
+}
+"#,
+    )
+    .expect("write ts");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rules = finding_rule_ids(&output);
+
+    assert!(rules.contains(&"style.unnecessary_else_after_return".to_string()));
+    assert!(rules.contains(&"style.nested_conditional".to_string()));
+    assert!(rules.contains(&"style.complex_condition".to_string()));
+    assert!(rules.contains(&"style.duplicated_literal".to_string()));
+}
+
+#[test]
+fn python_and_rust_style_suggestion_rules_are_reported() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("validators.py"),
+        r#"
+def left(value):
+    if not value:
+        raise ValueError("missing")
+
+def right(item):
+    if not item:
+        raise ValueError("missing")
+
+def risky():
+    try:
+        work()
+    except Exception:
+        pass
+"#,
+    )
+    .expect("write python");
+    std::fs::write(
+        temp.path().join("policy.rs"),
+        r#"
+fn repeated(value: Option<i32>, flag: i32) -> i32 {
+    match flag {
+        1 => value.unwrap(),
+        2 => value.unwrap(),
+        _ => 0,
+    }
+}
+
+fn manual(value: Option<i32>) -> i32 {
+    match value {
+        Some(inner) => inner,
+        None => 0,
+    }
+}
+
+fn unwraps(a: Option<i32>, b: Option<i32>, c: Option<i32>) -> i32 {
+    a.unwrap() + b.unwrap() + c.unwrap()
+}
+"#,
+    )
+    .expect("write rust");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rules = finding_rule_ids(&output);
+
+    assert!(rules.contains(&"python.broad_exception".to_string()));
+    assert!(rules.contains(&"python.repeated_validation_logic".to_string()));
+    assert!(rules.contains(&"rust.duplicate_match_arm_body".to_string()));
+    assert!(rules.contains(&"rust.manual_result_option_pattern".to_string()));
+    assert!(rules.contains(&"rust.repeated_unwrap_policy".to_string()));
+}
+
+#[test]
+fn suggestion_only_style_findings_are_not_applied_by_fix_safe() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("risky.py");
+    let before = r#"
+def risky():
+    try:
+        work()
+    except Exception:
+        pass
+"#;
+    std::fs::write(&file, before).expect("write python");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--fix-safe")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty());
+
+    assert_eq!(std::fs::read_to_string(file).expect("read python"), before);
+}
+
+fn finding_rule_ids(output: &[u8]) -> Vec<String> {
+    let json: serde_json::Value = serde_json::from_slice(output).expect("valid json");
+    json["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter_map(|finding| finding["ruleId"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
 fn scan_reports_duplicate_symbol_names() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(

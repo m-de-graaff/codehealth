@@ -603,6 +603,7 @@ fn build_exact_body_finding(group: &[SymbolBodyFingerprint]) -> Finding {
         autofix_explanation:
             "Exact body duplicates are not auto-fixed because extracting shared logic can change APIs, ownership, imports, and behavior around side effects."
                 .to_string(),
+        fixes: Vec::new(),
         metadata,
         is_suppressed: false,
         suppression: None,
@@ -777,6 +778,7 @@ fn build_structural_finding(group: &[StructuralSymbolFingerprint]) -> Finding {
         autofix_explanation:
             "Structural duplicates are not auto-fixed because equivalent shape can still represent intentionally separate domain behavior, public APIs, ownership rules, or side effects."
                 .to_string(),
+        fixes: Vec::new(),
         metadata,
         is_suppressed: false,
         suppression: None,
@@ -1011,6 +1013,7 @@ fn build_exact_file_finding(files: &[FileFingerprint]) -> Finding {
         autofix: AutofixSafety::SuggestionOnly,
         autofix_explanation: "Exact duplicate files are not auto-fixed because choosing which file to keep can change imports, ownership, and public APIs."
             .to_string(),
+        fixes: Vec::new(),
         metadata,
         is_suppressed: false,
         suppression: None,

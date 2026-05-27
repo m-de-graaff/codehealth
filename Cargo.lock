@@ -214,6 +214,8 @@ name = "codehealth-autofix"
 version = "0.1.0"
 dependencies = [
  "codehealth-core",
+ "codehealth-parser",
+ "thiserror",
 ]
 
 [[package]]
@@ -223,6 +225,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "codehealth-autofix",
  "codehealth-config",
  "codehealth-core",
  "codehealth-duplication",
@@ -340,6 +343,11 @@ name = "codehealth-rules"
 version = "0.1.0"
 dependencies = [
  "codehealth-core",
+ "codehealth-parser",
+ "codehealth-symbols",
+ "serde_json",
+ "sha2",
+ "tree-sitter",
 ]
 
 [[package]]
