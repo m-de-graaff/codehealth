@@ -14,6 +14,7 @@ members = [
     "crates/rules",
     "crates/rules_fastapi",
     "crates/rules_react",
+    "crates/rules_rust",
     "crates/symbols",
     "crates/testing",
     "crates/workspace",
@@ -63,6 +64,7 @@ codehealth-reporters = { path = "crates/reporters" }
 codehealth-rules = { path = "crates/rules" }
 codehealth-rules-fastapi = { path = "crates/rules_fastapi" }
 codehealth-rules-react = { path = "crates/rules_react" }
+codehealth-rules-rust = { path = "crates/rules_rust" }
 codehealth-symbols = { path = "crates/symbols" }
 codehealth-testing = { path = "crates/testing" }
 codehealth-workspace = { path = "crates/workspace" }

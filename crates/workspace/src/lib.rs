@@ -219,6 +219,13 @@ pub struct PythonEnvironmentMetadata {
 pub struct RustWorkspaceMetadata {
     pub cargo_tomls: Vec<PathBuf>,
     pub workspace_members: Vec<String>,
+    pub via_source_files: bool,
+}
+
+impl RustWorkspaceMetadata {
+    pub fn detected(&self) -> bool {
+        self.via_source_files || !self.cargo_tomls.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -828,6 +835,10 @@ fn observe_source_file(
     language: &str,
     text_sample: &Option<String>,
 ) {
+    if language.eq_ignore_ascii_case("rust") {
+        metadata.rust.via_source_files = true;
+    }
+
     if language.eq_ignore_ascii_case("tsx") {
         metadata.react.via_tsx_or_jsx = true;
     }

@@ -25,6 +25,7 @@ codehealth-reporters.workspace = true
 codehealth-rules.workspace = true
 codehealth-rules-fastapi.workspace = true
 codehealth-rules-react.workspace = true
+codehealth-rules-rust.workspace = true
 codehealth-symbols.workspace = true
 codehealth-workspace.workspace = true
 miette.workspace = true

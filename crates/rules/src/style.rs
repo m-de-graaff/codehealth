@@ -1,10 +1,9 @@
 use crate::{
     find_rule, PYTHON_BROAD_EXCEPTION, PYTHON_DUPLICATED_ROUTE_HANDLER_BUSINESS_LOGIC,
-    PYTHON_REPEATED_VALIDATION_LOGIC, RUST_DUPLICATE_MATCH_ARM_BODY,
-    RUST_MANUAL_RESULT_OPTION_PATTERN, RUST_REPEATED_UNWRAP_POLICY,
-    STYLE_BOOLEAN_RETURN_SIMPLIFIABLE, STYLE_COMPLEX_CONDITION, STYLE_DUPLICATED_LITERAL,
-    STYLE_EXPRESSION_ARROW_SIMPLIFIABLE, STYLE_GUARD_CLAUSE, STYLE_HIGH_PARAMETER_COUNT,
-    STYLE_LARGE_FUNCTION, STYLE_NESTED_CONDITIONAL, STYLE_UNNECESSARY_ELSE_AFTER_RETURN,
+    PYTHON_REPEATED_VALIDATION_LOGIC, STYLE_BOOLEAN_RETURN_SIMPLIFIABLE, STYLE_COMPLEX_CONDITION,
+    STYLE_DUPLICATED_LITERAL, STYLE_EXPRESSION_ARROW_SIMPLIFIABLE, STYLE_GUARD_CLAUSE,
+    STYLE_HIGH_PARAMETER_COUNT, STYLE_LARGE_FUNCTION, STYLE_NESTED_CONDITIONAL,
+    STYLE_UNNECESSARY_ELSE_AFTER_RETURN,
 };
 use crate::{Rule, RuleContext, RuleMetadata};
 use codehealth_core::{
@@ -48,12 +47,6 @@ pub fn style_rules() -> Vec<Box<dyn Rule>> {
         boxed(
             PYTHON_DUPLICATED_ROUTE_HANDLER_BUSINESS_LOGIC,
             python_duplicated_route_logic,
-        ),
-        boxed(RUST_DUPLICATE_MATCH_ARM_BODY, rust_duplicate_match_arm_body),
-        boxed(RUST_REPEATED_UNWRAP_POLICY, rust_repeated_unwrap_policy),
-        boxed(
-            RUST_MANUAL_RESULT_OPTION_PATTERN,
-            rust_manual_result_option_pattern,
         ),
     ]
 }
@@ -691,105 +684,6 @@ fn python_duplicated_route_logic(ctx: &RuleContext<'_>) -> Vec<Finding> {
         .collect()
 }
 
-fn rust_duplicate_match_arm_body(ctx: &RuleContext<'_>) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    walk(ctx.tree.root_node(), &mut |node| {
-        if node.kind() != "match_expression" {
-            return;
-        }
-        let arms = descendants_of_kind(node, "match_arm");
-        let mut by_body: BTreeMap<String, Vec<Node<'_>>> = BTreeMap::new();
-        for arm in arms {
-            let body = child_by_field_name(arm, "body")
-                .or_else(|| arm.named_child(arm.named_child_count().saturating_sub(1)));
-            let Some(body) = body else {
-                continue;
-            };
-            let normalized = collapse_whitespace(ctx.tree.text_for_node(body));
-            if normalized.len() < 8 {
-                continue;
-            }
-            by_body.entry(normalized).or_default().push(body);
-        }
-        for group in by_body.into_values().filter(|group| group.len() > 1) {
-            let mut metadata = BTreeMap::new();
-            metadata.insert("arms".to_string(), json!(group.len()));
-            findings.push(style_finding(
-                ctx,
-                RUST_DUPLICATE_MATCH_ARM_BODY,
-                ctx.tree.span_for_node(group[0]),
-                format!("{} match arms share the same body.", group.len()),
-                "Merge equivalent patterns with `|` or extract the repeated body into a helper when appropriate.".to_string(),
-                "A match expression contains more than one arm with the same normalized body.".to_string(),
-                AutofixSafety::SuggestionOnly,
-                Vec::new(),
-                metadata,
-            ));
-        }
-    });
-    findings
-}
-
-fn rust_repeated_unwrap_policy(ctx: &RuleContext<'_>) -> Vec<Finding> {
-    let max_unwraps = ctx
-        .config
-        .options_for(RUST_REPEATED_UNWRAP_POLICY)
-        .max_unwraps
-        .unwrap_or(2);
-    file_definitions(ctx)
-        .into_iter()
-        .filter(|definition| definition.language == Language::Rust && function_like(definition.kind))
-        .filter_map(|definition| {
-            let span = definition.body_span.unwrap_or(definition.span);
-            let source = slice_span(&ctx.source_file.source, span);
-            let count = source.matches(".unwrap()").count() + source.matches(".expect(").count();
-            (count > max_unwraps).then(|| {
-                let mut metadata = BTreeMap::new();
-                metadata.insert("unwrap_like_calls".to_string(), json!(count));
-                metadata.insert("max_unwraps".to_string(), json!(max_unwraps));
-                style_finding(
-                    ctx,
-                    RUST_REPEATED_UNWRAP_POLICY,
-                    span,
-                    format!("Function '{}' has {count} unwrap/expect calls.", definition.qualified_name),
-                    "Prefer propagating errors, handling None/Err explicitly, or adding one justified expect message near the boundary.".to_string(),
-                    "The function body contains repeated unwrap or expect calls beyond the configured threshold.".to_string(),
-                    AutofixSafety::SuggestionOnly,
-                    Vec::new(),
-                    metadata,
-                )
-            })
-        })
-        .collect()
-}
-
-fn rust_manual_result_option_pattern(ctx: &RuleContext<'_>) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    walk(ctx.tree.root_node(), &mut |node| {
-        if node.kind() != "match_expression" {
-            return;
-        }
-        let text = ctx.tree.text_for_node(node);
-        let option_like = text.contains("Some(") && text.contains("None");
-        let result_like = text.contains("Ok(") && text.contains("Err(");
-        if !(option_like || result_like) || text.lines().count() > 8 {
-            return;
-        }
-        findings.push(style_finding(
-            ctx,
-            RUST_MANUAL_RESULT_OPTION_PATTERN,
-            ctx.tree.span_for_node(node),
-            "Manual Result/Option match may have an idiomatic combinator.".to_string(),
-            "Consider `map`, `and_then`, `unwrap_or`, `ok_or`, or `?` if it keeps the intent clearer.".to_string(),
-            "A small match expression handles Result/Option variants manually.".to_string(),
-            AutofixSafety::SuggestionOnly,
-            Vec::new(),
-            BTreeMap::new(),
-        ));
-    });
-    findings
-}
-
 fn boolean_finding(
     ctx: &RuleContext<'_>,
     span: Span,
@@ -929,25 +823,6 @@ fn walk(node: Node<'_>, visitor: &mut impl FnMut(Node<'_>)) {
     visitor(node);
     for child in named_children(node) {
         walk(child, visitor);
-    }
-}
-
-fn descendants_of_kind<'tree>(node: Node<'tree>, kind: &str) -> Vec<Node<'tree>> {
-    let mut output = Vec::new();
-    collect_descendants_of_kind(node, kind, &mut output);
-    output
-}
-
-fn collect_descendants_of_kind<'tree>(
-    node: Node<'tree>,
-    kind: &str,
-    output: &mut Vec<Node<'tree>>,
-) {
-    if node.kind() == kind {
-        output.push(node);
-    }
-    for child in named_children(node) {
-        collect_descendants_of_kind(child, kind, output);
     }
 }
 

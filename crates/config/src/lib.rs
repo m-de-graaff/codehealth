@@ -54,6 +54,17 @@ require_response_model = "warn"
 blocking_call_allowlist = []
 blocking_call_patterns = ["requests.get", "requests.post", "requests.put", "requests.patch", "requests.delete", "time.sleep", "open(", ".read(", ".write("]
 
+[rust]
+enabled = true
+clippy_enabled = false
+clippy_command = "cargo"
+clippy_args = ["clippy", "--message-format=json", "--all-targets", "--all-features"]
+clippy_timeout_ms = 120000
+max_function_lines = 80
+max_params = 6
+max_unwraps = 2
+max_match_depth = 4
+
 [scanner]
 include = []
 exclude = []
@@ -109,9 +120,24 @@ paths = [
 "python.broad_exception" = "warn"
 "python.repeated_validation_logic" = "info"
 "python.duplicated_route_handler_business_logic" = "warn"
-"rust.duplicate_match_arm_body" = "info"
-"rust.repeated_unwrap_policy" = "warn"
-"rust.manual_result_option_pattern" = "info"
+"rust.large_function" = "warn"
+"rust.too_many_parameters" = "warn"
+"rust.duplicate_free_function" = "warn"
+"rust.duplicate_impl_method" = "warn"
+"rust.duplicate_trait_method_implementation" = "warn"
+"rust.repeated_match_arm_body" = "info"
+"rust.suspicious_unwrap_policy" = "warn"
+"rust.expect_without_context" = "info"
+"rust.repeated_error_mapping" = "info"
+"rust.manual_option_result_pattern_candidate" = "info"
+"rust.deeply_nested_match" = "warn"
+"rust.large_enum_variant_logic" = "info"
+"rust.repeated_result_handling" = "info"
+"rust.repeated_conversion_function" = "info"
+"rust.repeated_validation_logic" = "info"
+"rust.repeated_serde_glue" = "info"
+"rust.clippy_unavailable" = "info"
+"rust.clippy_run_failed" = "info"
 "react.large_component" = "warn"
 "react.too_many_props" = "warn"
 "react.deeply_nested_jsx" = "warn"
@@ -178,8 +204,73 @@ max_literal_occurrences = 3
 include_paths = []
 exclude_paths = []
 
-[rule_options."rust.repeated_unwrap_policy"]
+[rule_options."rust.large_function"]
+max_lines = 80
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.too_many_parameters"]
+max_params = 6
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.duplicate_free_function"]
+min_lines = 3
+min_tokens = 20
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.duplicate_impl_method"]
+min_lines = 3
+min_tokens = 20
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.duplicate_trait_method_implementation"]
+min_lines = 3
+min_tokens = 20
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.suspicious_unwrap_policy"]
 max_unwraps = 2
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.deeply_nested_match"]
+max_depth = 4
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.large_enum_variant_logic"]
+max_params = 6
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.repeated_result_handling"]
+min_nodes = 2
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.repeated_error_mapping"]
+min_nodes = 2
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.repeated_conversion_function"]
+min_lines = 3
+min_tokens = 20
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.repeated_validation_logic"]
+min_nodes = 2
+include_paths = []
+exclude_paths = []
+
+[rule_options."rust.repeated_serde_glue"]
+min_lines = 3
+min_tokens = 20
 include_paths = []
 exclude_paths = []
 
@@ -273,6 +364,7 @@ pub struct CodehealthConfig {
     pub style: StyleConfig,
     pub react: ReactConfig,
     pub fastapi: FastApiConfig,
+    pub rust: RustConfig,
     pub scanner: ScannerConfig,
     pub ci: CiConfig,
     pub ignore: IgnoreConfig,
@@ -562,6 +654,42 @@ impl Default for FastApiConfig {
                 ".read(".to_string(),
                 ".write(".to_string(),
             ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct RustConfig {
+    pub enabled: bool,
+    pub clippy_enabled: bool,
+    pub clippy_command: String,
+    pub clippy_args: Vec<String>,
+    pub clippy_timeout_ms: u64,
+    pub max_function_lines: usize,
+    pub max_params: usize,
+    pub max_unwraps: usize,
+    pub max_match_depth: usize,
+}
+
+impl Default for RustConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            clippy_enabled: false,
+            clippy_command: "cargo".to_string(),
+            clippy_args: vec![
+                "clippy".to_string(),
+                "--message-format=json".to_string(),
+                "--all-targets".to_string(),
+                "--all-features".to_string(),
+            ],
+            clippy_timeout_ms: 120_000,
+            max_function_lines: 80,
+            max_params: 6,
+            max_unwraps: 2,
+            max_match_depth: 4,
         }
     }
 }

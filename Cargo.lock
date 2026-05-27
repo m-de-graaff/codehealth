@@ -238,6 +238,7 @@ dependencies = [
  "codehealth-rules",
  "codehealth-rules-fastapi",
  "codehealth-rules-react",
+ "codehealth-rules-rust",
  "codehealth-symbols",
  "codehealth-workspace",
  "miette",
@@ -367,6 +368,19 @@ dependencies = [
 
 [[package]]
 name = "codehealth-rules-react"
+version = "0.1.0"
+dependencies = [
+ "codehealth-core",
+ "codehealth-parser",
+ "codehealth-rules",
+ "codehealth-symbols",
+ "serde_json",
+ "sha2",
+ "tree-sitter",
+]
+
+[[package]]
+name = "codehealth-rules-rust"
 version = "0.1.0"
 dependencies = [
  "codehealth-core",

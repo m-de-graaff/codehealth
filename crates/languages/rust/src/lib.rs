@@ -4,7 +4,7 @@ use codehealth_parser::{
     LanguageParser, LanguageRegistry, QueryKind, QuerySpec, SyntaxTree,
 };
 use codehealth_symbols::{
-    populate_structural_fingerprints, Attribute, Definition as SymbolDefinition,
+    populate_structural_fingerprints, Attribute, CallSite, Definition as SymbolDefinition,
     DefinitionKind as SymbolDefinitionKind, FileSymbols, Import as SymbolImport, Language,
     Parameter, ReturnType, Signature, SymbolExtractor, SymbolRegistry, Visibility,
 };
@@ -93,12 +93,49 @@ fn extract_symbols(tree: &SyntaxTree) -> FileSymbols {
         references: Vec::new(),
     };
     collect_rust_items(tree.root_node(), tree, &mut symbols.definitions);
+    collect_call_sites(tree.root_node(), tree, &mut symbols.call_sites);
     symbols.definitions.sort_by(|left, right| {
         left.file
             .cmp(&right.file)
             .then_with(|| left.span.start.cmp(&right.span.start))
     });
+    symbols.call_sites.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then_with(|| left.span.start.cmp(&right.span.start))
+            .then_with(|| left.callee.cmp(&right.callee))
+    });
     symbols
+}
+
+fn collect_call_sites(node: Node<'_>, tree: &SyntaxTree, calls: &mut Vec<CallSite>) {
+    if matches!(node.kind(), "call_expression" | "macro_invocation") {
+        if let Some(callee) = rust_callee_name(node, tree) {
+            calls.push(CallSite {
+                language: Language::Rust,
+                file: tree.source.path.clone(),
+                callee,
+                span: tree.span_for_node(node),
+            });
+        }
+    }
+
+    for child in named_children(node) {
+        collect_call_sites(child, tree, calls);
+    }
+}
+
+fn rust_callee_name(node: Node<'_>, tree: &SyntaxTree) -> Option<String> {
+    if node.kind() == "call_expression" {
+        return child_by_field_name(node, "function")
+            .or_else(|| node.named_child(0))
+            .map(|function| tree.text_for_node(function).trim().to_string());
+    }
+
+    child_by_field_name(node, "macro")
+        .or_else(|| child_by_field_name(node, "name"))
+        .or_else(|| node.named_child(0))
+        .map(|macro_name| tree.text_for_node(macro_name).trim().to_string())
 }
 
 fn extract_definitions_from_tree(tree: &SyntaxTree) -> Vec<Definition> {

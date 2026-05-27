@@ -937,9 +937,255 @@ fn unwraps(a: Option<i32>, b: Option<i32>, c: Option<i32>) -> i32 {
 
     assert!(rules.contains(&"python.broad_exception".to_string()));
     assert!(rules.contains(&"python.repeated_validation_logic".to_string()));
-    assert!(rules.contains(&"rust.duplicate_match_arm_body".to_string()));
-    assert!(rules.contains(&"rust.manual_result_option_pattern".to_string()));
-    assert!(rules.contains(&"rust.repeated_unwrap_policy".to_string()));
+    assert!(rules.contains(&"rust.repeated_match_arm_body".to_string()));
+    assert!(rules.contains(&"rust.manual_option_result_pattern_candidate".to_string()));
+    assert!(rules.contains(&"rust.suspicious_unwrap_policy".to_string()));
+}
+
+#[test]
+fn rust_health_rules_report_duplication_and_maintainability() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+[rust]
+max_function_lines = 4
+max_params = 3
+max_unwraps = 1
+max_match_depth = 1
+
+[rule_options."rust.duplicate_free_function"]
+min_lines = 1
+min_tokens = 1
+
+[rule_options."rust.duplicate_impl_method"]
+min_lines = 1
+min_tokens = 1
+
+[rule_options."rust.duplicate_trait_method_implementation"]
+min_lines = 1
+min_tokens = 1
+
+[rule_options."rust.repeated_conversion_function"]
+min_lines = 1
+min_tokens = 1
+
+[rule_options."rust.repeated_serde_glue"]
+min_lines = 1
+min_tokens = 1
+
+[rule_options."rust.large_enum_variant_logic"]
+max_params = 3
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("policy.rs"),
+        r#"
+pub enum Event {
+    Empty,
+    Huge(i32, i32, i32, i32, i32),
+}
+
+pub fn too_many(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    a + b + c + d
+}
+
+pub fn large() -> i32 {
+    let mut total = 0;
+    total += 1;
+    total += 2;
+    total += 3;
+    total
+}
+
+pub fn duplicate_left(value: Option<i32>) -> i32 {
+    let inner = value.unwrap();
+    inner + 1
+}
+
+pub fn duplicate_right(item: Option<i32>) -> i32 {
+    let inner = item.unwrap();
+    inner + 1
+}
+
+pub struct Repo;
+
+impl Repo {
+    pub fn save_left(&self, value: Option<i32>) -> i32 {
+        let inner = value.unwrap();
+        inner + 1
+    }
+
+    pub fn save_right(&self, item: Option<i32>) -> i32 {
+        let inner = item.unwrap();
+        inner + 1
+    }
+}
+
+pub trait Load {
+    fn load(&self, value: Option<i32>) -> i32;
+}
+
+pub struct A;
+pub struct B;
+
+impl Load for A {
+    fn load(&self, value: Option<i32>) -> i32 {
+        let inner = value.unwrap();
+        inner + 1
+    }
+}
+
+impl Load for B {
+    fn load(&self, item: Option<i32>) -> i32 {
+        let inner = item.unwrap();
+        inner + 1
+    }
+}
+
+pub fn repeated_match(value: i32, item: Option<i32>) -> i32 {
+    match value {
+        1 => item.unwrap(),
+        2 => item.unwrap(),
+        _ => 0,
+    }
+}
+
+pub fn unwraps(a: Option<i32>, b: Option<i32>) -> i32 {
+    a.unwrap() + b.unwrap()
+}
+
+pub fn bad_expect(value: Option<i32>) -> i32 {
+    value.expect("failed")
+}
+
+pub fn manual(value: Option<i32>) -> i32 {
+    match value {
+        Some(inner) => inner,
+        None => 0,
+    }
+}
+
+pub fn nested(value: Result<Option<i32>, ()>) -> i32 {
+    match value {
+        Ok(inner) => match inner {
+            Some(number) => number,
+            None => 0,
+        },
+        Err(_) => 0,
+    }
+}
+
+pub fn map_left(value: Result<i32, Error>) -> Result<i32, AppError> {
+    value.map_err(|err| AppError::from(err))
+}
+
+pub fn map_right(value: Result<i32, Error>) -> Result<i32, AppError> {
+    value.map_err(|err| AppError::from(err))
+}
+
+pub fn result_left(value: Result<i32, Error>) -> i32 {
+    match value {
+        Ok(inner) => inner,
+        Err(_) => 0,
+    }
+}
+
+pub fn result_right(item: Result<i32, Error>) -> i32 {
+    match item {
+        Ok(inner) => inner,
+        Err(_) => 0,
+    }
+}
+
+pub fn from_left(value: User) -> Dto {
+    Dto { id: value.id }
+}
+
+pub fn from_right(account: Account) -> Dto {
+    Dto { id: account.id }
+}
+
+pub fn validate_left(value: &str) -> Result<(), Error> {
+    if value.is_empty() {
+        return Err(Error::Missing);
+    }
+    Ok(())
+}
+
+pub fn validate_right(item: &str) -> Result<(), Error> {
+    if item.is_empty() {
+        return Err(Error::Missing);
+    }
+    Ok(())
+}
+
+pub fn serialize_left(value: &User) -> Result<String, Error> {
+    serde_json::to_string(value).map_err(|err| Error::from(err))
+}
+
+pub fn serialize_right(value: &Account) -> Result<String, Error> {
+    serde_json::to_string(value).map_err(|err| Error::from(err))
+}
+"#,
+    )
+    .expect("write rust");
+
+    let ids = finding_ids(&scan_json_with_config(temp.path(), &config));
+
+    assert!(ids.contains(&"rust.large_function".to_string()));
+    assert!(ids.contains(&"rust.too_many_parameters".to_string()));
+    assert!(ids.contains(&"rust.duplicate_free_function".to_string()));
+    assert!(ids.contains(&"rust.duplicate_impl_method".to_string()));
+    assert!(ids.contains(&"rust.duplicate_trait_method_implementation".to_string()));
+    assert!(ids.contains(&"rust.repeated_match_arm_body".to_string()));
+    assert!(ids.contains(&"rust.suspicious_unwrap_policy".to_string()));
+    assert!(ids.contains(&"rust.expect_without_context".to_string()));
+    assert!(ids.contains(&"rust.repeated_error_mapping".to_string()));
+    assert!(ids.contains(&"rust.manual_option_result_pattern_candidate".to_string()));
+    assert!(ids.contains(&"rust.deeply_nested_match".to_string()));
+    assert!(ids.contains(&"rust.large_enum_variant_logic".to_string()));
+    assert!(ids.contains(&"rust.repeated_result_handling".to_string()));
+    assert!(ids.contains(&"rust.repeated_conversion_function".to_string()));
+    assert!(ids.contains(&"rust.repeated_validation_logic".to_string()));
+    assert!(ids.contains(&"rust.repeated_serde_glue".to_string()));
+}
+
+#[test]
+fn rust_clippy_unavailable_is_nonfatal_when_requested() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(temp.path().join("src")).expect("create src");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+[rust]
+clippy_enabled = true
+clippy_command = "definitely-not-codehealth-clippy"
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .expect("write cargo");
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        "pub fn value() -> i32 { 1 }\n",
+    )
+    .expect("write rust");
+
+    let ids = finding_ids(&scan_json_with_config(temp.path(), &config));
+
+    assert!(ids.contains(&"rust.clippy_unavailable".to_string()));
 }
 
 #[test]

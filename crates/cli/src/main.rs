@@ -22,10 +22,11 @@ use codehealth_reporters::{
 use codehealth_rules::{
     canonical_rule_id, find_rule, rule_catalog, RuleContext, RuleExecutionConfig,
     RuleFastApiWorkspaceMetadata, RuleOptionSettings, RuleReactWorkspaceMetadata,
-    RuleRegistry as StyleRuleRegistry, RuleWorkspaceMetadata,
+    RuleRegistry as StyleRuleRegistry, RuleRustWorkspaceMetadata, RuleWorkspaceMetadata,
 };
 use codehealth_rules_fastapi::fastapi_rules;
 use codehealth_rules_react::react_rules;
+use codehealth_rules_rust::rust_rules;
 use codehealth_symbols::{
     build_symbol_index, find_duplicate_name_findings, Definition, DefinitionKind,
     Language as SymbolLanguage, SymbolIndex, SymbolInput, SymbolRegistry,
@@ -43,6 +44,7 @@ use std::{
 };
 
 mod baseline;
+mod clippy;
 
 fn main() -> ExitCode {
     match run() {
@@ -171,6 +173,12 @@ struct RunArgs {
 
     #[arg(long)]
     config: Option<PathBuf>,
+
+    #[arg(long)]
+    with_clippy: bool,
+
+    #[arg(long)]
+    no_clippy: bool,
 }
 
 #[derive(Debug, Args)]
@@ -436,8 +444,9 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
     result.stats.files_discovered = workspace_scan.files_discovered();
     result.stats.files_skipped = workspace_scan.skipped.len();
     result.stats.config_files = workspace_scan.config_files.len();
-    let workspace_frameworks = workspace_scan.metadata.frameworks();
-    let rule_workspace = rule_workspace_metadata(&workspace_scan.metadata);
+    let workspace_metadata = workspace_scan.metadata.clone();
+    let workspace_frameworks = workspace_metadata.frameworks();
+    let rule_workspace = rule_workspace_metadata(&workspace_metadata);
     let files = workspace_scan.files;
     result.stats.files_scanned = files.len();
     let generated_paths = generated_source_paths(&files);
@@ -481,6 +490,12 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
             &workspace_frameworks,
             &rule_workspace,
         )?);
+        let clippy_enabled = effective_clippy_enabled(&args, config);
+        if clippy_enabled {
+            let clippy_findings =
+                clippy::run_clippy_checks(config, &result.root, &workspace_metadata, &files);
+            merge_clippy_findings(&mut findings, clippy_findings);
+        }
     }
 
     let mut suppressed_rule_counts = BTreeMap::new();
@@ -616,6 +631,56 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
     }
 }
 
+fn effective_clippy_enabled(args: &RunArgs, config: &CodehealthConfig) -> bool {
+    if args.no_clippy {
+        false
+    } else {
+        args.with_clippy || config.rust.clippy_enabled
+    }
+}
+
+fn merge_clippy_findings(findings: &mut Vec<Finding>, clippy_findings: Vec<Finding>) {
+    for clippy_finding in clippy_findings {
+        let Some(primary) = clippy_finding.locations.first() else {
+            findings.push(clippy_finding);
+            continue;
+        };
+        let Some(existing) = findings.iter_mut().find(|finding| {
+            finding.kind == FindingKind::Rust
+                && finding
+                    .locations
+                    .first()
+                    .is_some_and(|location| locations_overlap(location, primary))
+        }) else {
+            findings.push(clippy_finding);
+            continue;
+        };
+        let entry = existing
+            .metadata
+            .entry("clippy_overlaps".to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        if let Some(values) = entry.as_array_mut() {
+            values.push(serde_json::json!(clippy_finding.rule_id));
+        }
+    }
+}
+
+fn locations_overlap(
+    left: &codehealth_core::FindingLocation,
+    right: &codehealth_core::FindingLocation,
+) -> bool {
+    if left.path != right.path {
+        return false;
+    }
+    let Some(left_span) = left.span else {
+        return false;
+    };
+    let Some(right_span) = right.span else {
+        return false;
+    };
+    left_span.start < right_span.end && right_span.start < left_span.end
+}
+
 fn filters_from_args(args: &RunArgs) -> FindingFilters {
     FindingFilters {
         min_severity: args.min_severity.map(Into::into),
@@ -723,6 +788,9 @@ fn run_style_checks(
     for rule in fastapi_rules() {
         registry.register_box(rule);
     }
+    for rule in rust_rules() {
+        registry.register_box(rule);
+    }
     let mut findings = Vec::new();
 
     for file in files {
@@ -779,6 +847,12 @@ fn rule_workspace_metadata(metadata: &WorkspaceMetadata) -> RuleWorkspaceMetadat
             via_security_dependency: metadata.fastapi.via_security_dependency,
             via_pydantic_model: metadata.fastapi.via_pydantic_model,
         },
+        rust: RuleRustWorkspaceMetadata {
+            detected: metadata.rust.detected(),
+            via_source_files: metadata.rust.via_source_files,
+            cargo_tomls: metadata.rust.cargo_tomls.clone(),
+            workspace_members: metadata.rust.workspace_members.clone(),
+        },
     }
 }
 
@@ -803,6 +877,7 @@ fn rule_execution_config_for_file(
                             | codehealth_rules::FASTAPI_REQUESTS_CALL_INSIDE_ASYNC_ROUTE
                             | codehealth_rules::FASTAPI_SYNC_DB_CALL_INSIDE_ASYNC_ROUTE
                     ))
+                || (!config.rust.enabled && rule.language == Some("rust"))
         })
         .map(|rule| rule.code.to_string())
         .collect();
@@ -826,6 +901,11 @@ fn rule_execution_config_for_file(
         fastapi_require_response_model: config.fastapi.require_response_model.clone(),
         fastapi_blocking_call_allowlist: config.fastapi.blocking_call_allowlist.clone(),
         fastapi_blocking_call_patterns: config.fastapi.blocking_call_patterns.clone(),
+        rust_enabled: config.rust.enabled,
+        rust_max_function_lines: config.rust.max_function_lines,
+        rust_max_params: config.rust.max_params,
+        rust_max_unwraps: config.rust.max_unwraps,
+        rust_max_match_depth: config.rust.max_match_depth,
         disabled_rules,
         options,
     }

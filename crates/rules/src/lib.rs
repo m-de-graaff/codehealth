@@ -25,9 +25,29 @@ pub const PYTHON_BROAD_EXCEPTION: &str = "python.broad_exception";
 pub const PYTHON_REPEATED_VALIDATION_LOGIC: &str = "python.repeated_validation_logic";
 pub const PYTHON_DUPLICATED_ROUTE_HANDLER_BUSINESS_LOGIC: &str =
     "python.duplicated_route_handler_business_logic";
-pub const RUST_DUPLICATE_MATCH_ARM_BODY: &str = "rust.duplicate_match_arm_body";
-pub const RUST_REPEATED_UNWRAP_POLICY: &str = "rust.repeated_unwrap_policy";
-pub const RUST_MANUAL_RESULT_OPTION_PATTERN: &str = "rust.manual_result_option_pattern";
+pub const RUST_LARGE_FUNCTION: &str = "rust.large_function";
+pub const RUST_TOO_MANY_PARAMETERS: &str = "rust.too_many_parameters";
+pub const RUST_DUPLICATE_FREE_FUNCTION: &str = "rust.duplicate_free_function";
+pub const RUST_DUPLICATE_IMPL_METHOD: &str = "rust.duplicate_impl_method";
+pub const RUST_DUPLICATE_TRAIT_METHOD_IMPLEMENTATION: &str =
+    "rust.duplicate_trait_method_implementation";
+pub const RUST_REPEATED_MATCH_ARM_BODY: &str = "rust.repeated_match_arm_body";
+pub const RUST_SUSPICIOUS_UNWRAP_POLICY: &str = "rust.suspicious_unwrap_policy";
+pub const RUST_EXPECT_WITHOUT_CONTEXT: &str = "rust.expect_without_context";
+pub const RUST_REPEATED_ERROR_MAPPING: &str = "rust.repeated_error_mapping";
+pub const RUST_MANUAL_OPTION_RESULT_PATTERN_CANDIDATE: &str =
+    "rust.manual_option_result_pattern_candidate";
+pub const RUST_DEEPLY_NESTED_MATCH: &str = "rust.deeply_nested_match";
+pub const RUST_LARGE_ENUM_VARIANT_LOGIC: &str = "rust.large_enum_variant_logic";
+pub const RUST_REPEATED_RESULT_HANDLING: &str = "rust.repeated_result_handling";
+pub const RUST_REPEATED_CONVERSION_FUNCTION: &str = "rust.repeated_conversion_function";
+pub const RUST_REPEATED_VALIDATION_LOGIC: &str = "rust.repeated_validation_logic";
+pub const RUST_REPEATED_SERDE_GLUE: &str = "rust.repeated_serde_glue";
+pub const RUST_CLIPPY_UNAVAILABLE: &str = "rust.clippy_unavailable";
+pub const RUST_CLIPPY_RUN_FAILED: &str = "rust.clippy_run_failed";
+pub const RUST_DUPLICATE_MATCH_ARM_BODY: &str = RUST_REPEATED_MATCH_ARM_BODY;
+pub const RUST_REPEATED_UNWRAP_POLICY: &str = RUST_SUSPICIOUS_UNWRAP_POLICY;
+pub const RUST_MANUAL_RESULT_OPTION_PATTERN: &str = RUST_MANUAL_OPTION_RESULT_PATTERN_CANDIDATE;
 pub const REACT_LARGE_COMPONENT: &str = "react.large_component";
 pub const REACT_TOO_MANY_PROPS: &str = "react.too_many_props";
 pub const REACT_DEEPLY_NESTED_JSX: &str = "react.deeply_nested_jsx";
@@ -105,6 +125,11 @@ pub struct RuleExecutionConfig {
     pub fastapi_require_response_model: String,
     pub fastapi_blocking_call_allowlist: Vec<String>,
     pub fastapi_blocking_call_patterns: Vec<String>,
+    pub rust_enabled: bool,
+    pub rust_max_function_lines: usize,
+    pub rust_max_params: usize,
+    pub rust_max_unwraps: usize,
+    pub rust_max_match_depth: usize,
     pub disabled_rules: BTreeSet<String>,
     pub options: BTreeMap<String, RuleOptionSettings>,
 }
@@ -138,6 +163,7 @@ pub struct RuleOptionSettings {
 pub struct RuleWorkspaceMetadata {
     pub react: RuleReactWorkspaceMetadata,
     pub fastapi: RuleFastApiWorkspaceMetadata,
+    pub rust: RuleRustWorkspaceMetadata,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -162,6 +188,14 @@ pub struct RuleFastApiWorkspaceMetadata {
     pub via_dependency_injection: bool,
     pub via_security_dependency: bool,
     pub via_pydantic_model: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleRustWorkspaceMetadata {
+    pub detected: bool,
+    pub via_source_files: bool,
+    pub cargo_tomls: Vec<PathBuf>,
+    pub workspace_members: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -430,27 +464,150 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
         )
         .with_language("python")
         .with_framework("fastapi"),
-        style_rule(
-            RUST_DUPLICATE_MATCH_ARM_BODY,
-            "Duplicate Rust match arm body",
+        rust_rule(
+            RUST_LARGE_FUNCTION,
+            &[],
+            "Large Rust function",
+            "Finds Rust functions and methods whose body length exceeds the configured threshold.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_TOO_MANY_PARAMETERS,
+            &[],
+            "Too many Rust parameters",
+            "Finds Rust functions and methods with more parameters than the configured threshold.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_DUPLICATE_FREE_FUNCTION,
+            &[],
+            "Duplicate Rust free function",
+            "Finds free functions with duplicated structural bodies.",
+            Severity::Medium,
+            Confidence::High,
+        ),
+        rust_rule(
+            RUST_DUPLICATE_IMPL_METHOD,
+            &["rust.duplicate_impl_method_body"],
+            "Duplicate Rust impl method",
+            "Finds impl methods with duplicated structural bodies.",
+            Severity::Medium,
+            Confidence::High,
+        ),
+        rust_rule(
+            RUST_DUPLICATE_TRAIT_METHOD_IMPLEMENTATION,
+            &[],
+            "Duplicate Rust trait method implementation",
+            "Finds repeated trait method implementations with duplicated structure.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_REPEATED_MATCH_ARM_BODY,
+            &["rust.duplicate_match_arm_body"],
+            "Repeated Rust match arm body",
             "Finds match arms with repeated bodies.",
-            AutofixSafety::SuggestionOnly,
-        )
-        .with_language("rust"),
-        style_rule(
-            RUST_REPEATED_UNWRAP_POLICY,
-            "Repeated Rust unwrap policy",
+            Severity::Low,
+            Confidence::High,
+        ),
+        rust_rule(
+            RUST_SUSPICIOUS_UNWRAP_POLICY,
+            &["rust.repeated_unwrap_policy", "rust.unwrap_expect_policy"],
+            "Suspicious Rust unwrap policy",
             "Finds functions with repeated unwrap or expect calls.",
-            AutofixSafety::SuggestionOnly,
-        )
-        .with_language("rust"),
-        style_rule(
-            RUST_MANUAL_RESULT_OPTION_PATTERN,
-            "Manual Rust Result/Option pattern",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_EXPECT_WITHOUT_CONTEXT,
+            &[],
+            "Rust expect without context",
+            "Finds expect calls whose message is empty or too generic to aid debugging.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_REPEATED_ERROR_MAPPING,
+            &[],
+            "Repeated Rust error mapping",
+            "Finds repeated map_err closures that may deserve a shared conversion helper.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_MANUAL_OPTION_RESULT_PATTERN_CANDIDATE,
+            &["rust.manual_result_option_pattern"],
+            "Manual Rust Option/Result pattern candidate",
             "Finds simple manual Result/Option matches that may have idiomatic combinators.",
-            AutofixSafety::SuggestionOnly,
-        )
-        .with_language("rust"),
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_DEEPLY_NESTED_MATCH,
+            &[],
+            "Deeply nested Rust match",
+            "Finds nested match expressions beyond the configured depth.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_LARGE_ENUM_VARIANT_LOGIC,
+            &[],
+            "Large Rust enum variant logic",
+            "Finds enum variants with unusually large payloads that may affect ergonomics or layout.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_REPEATED_RESULT_HANDLING,
+            &[],
+            "Repeated Rust Result handling",
+            "Finds repeated Ok/Err match handling patterns.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_REPEATED_CONVERSION_FUNCTION,
+            &[],
+            "Repeated Rust conversion function",
+            "Finds repeated from/to/into/as conversion functions with duplicated structure.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_REPEATED_VALIDATION_LOGIC,
+            &[],
+            "Repeated Rust validation logic",
+            "Finds repeated validation-and-error-return patterns.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_REPEATED_SERDE_GLUE,
+            &[],
+            "Repeated Rust serialization glue",
+            "Finds repeated serialization/deserialization helper structure.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        rust_rule(
+            RUST_CLIPPY_UNAVAILABLE,
+            &[],
+            "Rust Clippy unavailable",
+            "Reports when optional Clippy integration was requested but Cargo/Clippy could not be launched.",
+            Severity::Info,
+            Confidence::High,
+        ),
+        rust_rule(
+            RUST_CLIPPY_RUN_FAILED,
+            &[],
+            "Rust Clippy run failed",
+            "Reports when optional Clippy integration exits unsuccessfully before producing usable diagnostics.",
+            Severity::Info,
+            Confidence::High,
+        ),
         react_rule(
             REACT_LARGE_COMPONENT,
             &["react.large.component"],
@@ -668,13 +825,6 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             Severity::Medium,
             Confidence::High,
         ),
-        planned(
-            "rust.unwrap_expect_policy",
-            &[],
-            "Rust unwrap/expect policy",
-            FindingKind::Rust,
-        )
-        .with_language("rust"),
     ];
 
     rules.sort_by(|left, right| left.code.cmp(right.code));
@@ -831,6 +981,35 @@ fn fastapi_rule(
         autofix: AutofixSafety::SuggestionOnly,
         autofix_explanation:
             "Suggestion only. FastAPI route changes can alter API behavior, dependency lifetimes, response schemas, or async execution semantics.",
+    }
+}
+
+fn rust_rule(
+    code: &'static str,
+    aliases: &'static [&'static str],
+    name: &'static str,
+    description: &'static str,
+    default_severity: Severity,
+    default_confidence: Confidence,
+) -> RuleMetadata {
+    RuleMetadata {
+        code,
+        aliases,
+        name,
+        description,
+        category: "rust_idiom",
+        kind: FindingKind::Rust,
+        default_severity,
+        default_confidence,
+        implemented: true,
+        language: Some("rust"),
+        framework: None,
+        explanation: description,
+        remediation: "Prefer smaller functions, clearer ownership/error boundaries, shared helpers, and idiomatic Result/Option handling where that preserves intent.",
+        detection_reason: "The Rust analyzer inspected indexed Rust symbols, attributes, impl context, calls, and conservative syntax patterns.",
+        autofix: AutofixSafety::SuggestionOnly,
+        autofix_explanation:
+            "Suggestion only. Rust refactors can affect ownership, lifetimes, public APIs, error semantics, and macro-expanded behavior.",
     }
 }
 
