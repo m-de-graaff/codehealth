@@ -51,6 +51,8 @@ enabled = true
 detect_duplicate_routes = true
 detect_blocking_async_calls = true
 require_response_model = "warn"
+blocking_call_allowlist = []
+blocking_call_patterns = ["requests.get", "requests.post", "requests.put", "requests.patch", "requests.delete", "time.sleep", "open(", ".read(", ".write("]
 
 [scanner]
 include = []
@@ -126,6 +128,19 @@ paths = [
 "react.component_too_many_responsibilities" = "warn"
 "react.redundant_fragment" = "info"
 "fastapi.duplicate.route" = "error"
+"fastapi.route_conflict" = "error"
+"fastapi.blocking_call_in_async_route" = "warn"
+"fastapi.missing_response_model" = "warn"
+"fastapi.large_route_handler" = "warn"
+"fastapi.business_logic_in_route" = "warn"
+"fastapi.repeated_dependency_logic" = "warn"
+"fastapi.repeated_auth_logic" = "warn"
+"fastapi.broad_exception_in_route" = "warn"
+"fastapi.inconsistent_status_code" = "info"
+"fastapi.duplicated_pydantic_model" = "info"
+"fastapi.route_handler_duplicate_logic" = "warn"
+"fastapi.sync_db_call_inside_async_route" = "warn"
+"fastapi.requests_call_inside_async_route" = "warn"
 
 [rule_options."duplicate.exact.file"]
 include_paths = []
@@ -200,6 +215,32 @@ exclude_paths = []
 
 [rule_options."react.component_too_many_responsibilities"]
 max_responsibilities = 5
+include_paths = []
+exclude_paths = []
+
+[rule_options."fastapi.large_route_handler"]
+max_lines = 80
+include_paths = []
+exclude_paths = []
+
+[rule_options."fastapi.repeated_dependency_logic"]
+min_nodes = 3
+include_paths = []
+exclude_paths = []
+
+[rule_options."fastapi.repeated_auth_logic"]
+min_nodes = 3
+include_paths = []
+exclude_paths = []
+
+[rule_options."fastapi.duplicated_pydantic_model"]
+min_nodes = 3
+include_paths = []
+exclude_paths = []
+
+[rule_options."fastapi.route_handler_duplicate_logic"]
+min_lines = 5
+min_tokens = 40
 include_paths = []
 exclude_paths = []
 
@@ -498,6 +539,8 @@ pub struct FastApiConfig {
     pub detect_duplicate_routes: bool,
     pub detect_blocking_async_calls: bool,
     pub require_response_model: String,
+    pub blocking_call_allowlist: Vec<String>,
+    pub blocking_call_patterns: Vec<String>,
 }
 
 impl Default for FastApiConfig {
@@ -507,6 +550,18 @@ impl Default for FastApiConfig {
             detect_duplicate_routes: true,
             detect_blocking_async_calls: true,
             require_response_model: "warn".to_string(),
+            blocking_call_allowlist: Vec::new(),
+            blocking_call_patterns: vec![
+                "requests.get".to_string(),
+                "requests.post".to_string(),
+                "requests.put".to_string(),
+                "requests.patch".to_string(),
+                "requests.delete".to_string(),
+                "time.sleep".to_string(),
+                "open(".to_string(),
+                ".read(".to_string(),
+                ".write(".to_string(),
+            ],
         }
     }
 }

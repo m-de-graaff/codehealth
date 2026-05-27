@@ -21,14 +21,14 @@ use codehealth_reporters::{
 };
 use codehealth_rules::{
     canonical_rule_id, find_rule, rule_catalog, RuleContext, RuleExecutionConfig,
-    RuleOptionSettings, RuleReactWorkspaceMetadata, RuleRegistry as StyleRuleRegistry,
-    RuleWorkspaceMetadata,
+    RuleFastApiWorkspaceMetadata, RuleOptionSettings, RuleReactWorkspaceMetadata,
+    RuleRegistry as StyleRuleRegistry, RuleWorkspaceMetadata,
 };
+use codehealth_rules_fastapi::fastapi_rules;
 use codehealth_rules_react::react_rules;
 use codehealth_symbols::{
-    build_symbol_index, find_duplicate_fastapi_route_findings, find_duplicate_name_findings,
-    Definition, DefinitionKind, Language as SymbolLanguage, SymbolIndex, SymbolInput,
-    SymbolRegistry,
+    build_symbol_index, find_duplicate_name_findings, Definition, DefinitionKind,
+    Language as SymbolLanguage, SymbolIndex, SymbolInput, SymbolRegistry,
 };
 use codehealth_workspace::{
     scan_workspace, WorkspaceFile, WorkspaceMetadata, WorkspaceScan, WorkspaceScanOptions,
@@ -704,12 +704,6 @@ fn run_duplicate_checks(
         }
     }
 
-    if config.fastapi.enabled && config.fastapi.detect_duplicate_routes {
-        if let Some(symbol_index) = symbol_index {
-            findings.extend(find_duplicate_fastapi_route_findings(symbol_index));
-        }
-    }
-
     Ok(findings)
 }
 
@@ -724,6 +718,9 @@ fn run_style_checks(
 ) -> anyhow::Result<Vec<Finding>> {
     let mut registry = StyleRuleRegistry::with_builtin_rules();
     for rule in react_rules() {
+        registry.register_box(rule);
+    }
+    for rule in fastapi_rules() {
         registry.register_box(rule);
     }
     let mut findings = Vec::new();
@@ -771,6 +768,17 @@ fn rule_workspace_metadata(metadata: &WorkspaceMetadata) -> RuleWorkspaceMetadat
             via_remix_dependency: metadata.react.via_remix_dependency,
             source_directories: metadata.react.source_directories.clone(),
         },
+        fastapi: RuleFastApiWorkspaceMetadata {
+            detected: metadata.fastapi.detected(),
+            via_dependency: metadata.fastapi.via_dependency,
+            via_import: metadata.fastapi.via_import,
+            via_app_initialization: metadata.fastapi.via_app_initialization,
+            via_router_initialization: metadata.fastapi.via_router_initialization,
+            via_route_decorator: metadata.fastapi.via_route_decorator,
+            via_dependency_injection: metadata.fastapi.via_dependency_injection,
+            via_security_dependency: metadata.fastapi.via_security_dependency,
+            via_pydantic_model: metadata.fastapi.via_pydantic_model,
+        },
     }
 }
 
@@ -785,6 +793,16 @@ fn rule_execution_config_for_file(
         .filter(|rule| {
             config.level_for_rule(rule.code, root, &paths).is_off()
                 || (!config.react.enabled && rule.framework == Some("react"))
+                || (!config.fastapi.enabled && rule.framework == Some("fastapi"))
+                || (!config.fastapi.detect_duplicate_routes
+                    && rule.code == codehealth_rules::FASTAPI_DUPLICATE_ROUTE)
+                || (!config.fastapi.detect_blocking_async_calls
+                    && matches!(
+                        rule.code,
+                        codehealth_rules::FASTAPI_BLOCKING_CALL_IN_ASYNC_ROUTE
+                            | codehealth_rules::FASTAPI_REQUESTS_CALL_INSIDE_ASYNC_ROUTE
+                            | codehealth_rules::FASTAPI_SYNC_DB_CALL_INSIDE_ASYNC_ROUTE
+                    ))
         })
         .map(|rule| rule.code.to_string())
         .collect();
@@ -802,6 +820,12 @@ fn rule_execution_config_for_file(
         react_max_component_lines: config.react.max_component_lines,
         react_max_props: config.react.max_props,
         react_prop_drilling_depth: config.react.prop_drilling_depth,
+        fastapi_enabled: config.fastapi.enabled,
+        fastapi_detect_duplicate_routes: config.fastapi.detect_duplicate_routes,
+        fastapi_detect_blocking_async_calls: config.fastapi.detect_blocking_async_calls,
+        fastapi_require_response_model: config.fastapi.require_response_model.clone(),
+        fastapi_blocking_call_allowlist: config.fastapi.blocking_call_allowlist.clone(),
+        fastapi_blocking_call_patterns: config.fastapi.blocking_call_patterns.clone(),
         disabled_rules,
         options,
     }

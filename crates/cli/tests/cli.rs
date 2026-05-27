@@ -977,6 +977,56 @@ fn finding_rule_ids(output: &[u8]) -> Vec<String> {
         .collect()
 }
 
+fn scan_json(path: &Path) -> serde_json::Value {
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(path)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).expect("valid json")
+}
+
+fn scan_json_with_config(path: &Path, config: &Path) -> serde_json::Value {
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(path)
+        .arg("--config")
+        .arg(config)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).expect("valid json")
+}
+
+fn finding_ids(json: &serde_json::Value) -> Vec<String> {
+    json["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .filter_map(|finding| finding["ruleId"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn finding_by_rule<'a>(json: &'a serde_json::Value, rule_id: &str) -> &'a serde_json::Value {
+    json["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|finding| finding["ruleId"] == rule_id)
+        .unwrap_or_else(|| panic!("missing finding {rule_id}"))
+}
+
 #[test]
 fn scan_reports_duplicate_symbol_names() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1397,6 +1447,270 @@ async def read_user(user_id: int) -> dict[str, int]:
         .success()
         .stdout(contains("HIGH  fastapi.duplicate.route"))
         .stdout(contains("GET /users/{user_id}"));
+}
+
+#[test]
+fn fastapi_duplicate_routes_include_resolved_prefix_and_related_locations() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("app.py"),
+        r#"
+from fastapi import APIRouter, FastAPI
+
+app = FastAPI()
+router = APIRouter(prefix="/users")
+
+@router.get("/{user_id}", response_model=dict[str, int])
+async def get_user(user_id: int) -> dict[str, int]:
+    return {"id": user_id}
+
+@router.get("/{user_id}", response_model=dict[str, int])
+async def read_user(user_id: int) -> dict[str, int]:
+    return {"id": user_id}
+
+app.include_router(router, prefix="/api")
+"#,
+    )
+    .expect("write fastapi app");
+
+    let json = scan_json(temp.path());
+    let duplicate = finding_by_rule(&json, "fastapi.duplicate.route");
+
+    assert_eq!(duplicate["metadata"]["path"], "/api/users/{user_id}");
+    assert_eq!(duplicate["metadata"]["raw_path"], "/{user_id}");
+    assert_eq!(
+        duplicate["locations"].as_array().expect("locations").len(),
+        2
+    );
+    assert_eq!(
+        duplicate["relatedLocations"]
+            .as_array()
+            .expect("related locations")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn fastapi_route_rules_report_async_blocking_and_contract_risks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+[rule_options."fastapi.large_route_handler"]
+max_lines = 4
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("app.py"),
+        r#"
+from fastapi import Depends, FastAPI, Security
+import requests
+import time
+
+app = FastAPI()
+
+def get_db():
+    return None
+
+def current_user():
+    return "user"
+
+@app.get("/users/{user_id}")
+async def read_user(user_id: int, db=Depends(get_db), user=Security(current_user)):
+    if user_id < 1:
+        return {"error": "bad"}
+    results = []
+    for item in range(2):
+        results.append(item)
+    time.sleep(1)
+    data = requests.get("https://example.com").json()
+    users = db.query(User).all()
+    try:
+        audit(data)
+    except Exception:
+        pass
+    return {"id": user_id, "users": users}
+"#,
+    )
+    .expect("write fastapi app");
+
+    let ids = finding_ids(&scan_json_with_config(temp.path(), &config));
+
+    assert!(ids.contains(&"fastapi.blocking_call_in_async_route".to_string()));
+    assert!(ids.contains(&"fastapi.requests_call_inside_async_route".to_string()));
+    assert!(ids.contains(&"fastapi.sync_db_call_inside_async_route".to_string()));
+    assert!(ids.contains(&"fastapi.missing_response_model".to_string()));
+    assert!(ids.contains(&"fastapi.large_route_handler".to_string()));
+    assert!(ids.contains(&"fastapi.business_logic_in_route".to_string()));
+    assert!(ids.contains(&"fastapi.broad_exception_in_route".to_string()));
+}
+
+#[test]
+fn fastapi_route_conflicts_and_repeated_dependency_patterns_are_reported() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("app.py"),
+        r#"
+from fastapi import Depends, FastAPI, Security
+
+app = FastAPI()
+
+def get_db():
+    return None
+
+def current_user():
+    return "user"
+
+@app.get("/users/{user_id}", response_model=dict[str, int])
+async def read_user(user_id: int, db=Depends(get_db), user=Security(current_user)):
+    return {"id": user_id}
+
+@app.get("/users/{id}", response_model=dict[str, int])
+async def read_user_alias(id: int, db=Depends(get_db), user=Security(current_user)):
+    return {"id": id}
+
+@app.get("/accounts/{account_id}", response_model=dict[str, int])
+async def read_account(account_id: int, db=Depends(get_db), user=Security(current_user)):
+    return {"id": account_id}
+"#,
+    )
+    .expect("write fastapi app");
+
+    let ids = finding_ids(&scan_json(temp.path()));
+
+    assert!(ids.contains(&"fastapi.route_conflict".to_string()));
+    assert!(ids.contains(&"fastapi.repeated_dependency_logic".to_string()));
+    assert!(ids.contains(&"fastapi.repeated_auth_logic".to_string()));
+}
+
+#[test]
+fn fastapi_pydantic_duplicate_model_suggestions_are_conservative() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("app.py"),
+        r#"
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class UserPayload(BaseModel):
+    name: str
+    email: str
+    age: int
+
+class AccountPayload(BaseModel):
+    name: str
+    email: str
+    age: int
+
+class UserCreate(BaseModel):
+    name: str
+    email: str
+    age: int
+
+class UserResponse(BaseModel):
+    name: str
+    email: str
+    age: int
+"#,
+    )
+    .expect("write fastapi app");
+
+    let json = scan_json(temp.path());
+    let finding = finding_by_rule(&json, "fastapi.duplicated_pydantic_model");
+
+    assert_eq!(finding["locations"].as_array().expect("locations").len(), 2);
+    assert_eq!(
+        finding["metadata"]["model_names"]
+            .as_array()
+            .expect("model names")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn fastapi_status_code_and_duplicate_route_logic_are_reported() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+[rule_options."fastapi.route_handler_duplicate_logic"]
+min_lines = 3
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("app.py"),
+        r#"
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.post("/users", response_model=dict)
+async def create_user(payload: dict) -> dict:
+    value = payload.get("id")
+    if value:
+        return {"id": value}
+    return {"id": 1}
+
+@app.post("/accounts", response_model=dict)
+async def create_account(payload: dict) -> dict:
+    value = payload.get("id")
+    if value:
+        return {"id": value}
+    return {"id": 1}
+
+@app.delete("/users/{user_id}")
+async def delete_user(user_id: int):
+    return {"deleted": user_id}
+"#,
+    )
+    .expect("write fastapi app");
+
+    let ids = finding_ids(&scan_json_with_config(temp.path(), &config));
+
+    assert!(ids.contains(&"fastapi.inconsistent_status_code".to_string()));
+    assert!(ids.contains(&"fastapi.route_handler_duplicate_logic".to_string()));
+}
+
+#[test]
+fn fastapi_blocking_call_allowlist_suppresses_configured_pattern() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+[fastapi]
+blocking_call_allowlist = ["time.sleep"]
+blocking_call_patterns = ["time.sleep"]
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("app.py"),
+        r#"
+from fastapi import FastAPI
+import time
+
+app = FastAPI()
+
+@app.get("/slow")
+async def slow():
+    time.sleep(1)
+    return {"ok": True}
+"#,
+    )
+    .expect("write fastapi app");
+
+    let ids = finding_ids(&scan_json_with_config(temp.path(), &config));
+
+    assert!(!ids.contains(&"fastapi.blocking_call_in_async_route".to_string()));
 }
 
 #[test]

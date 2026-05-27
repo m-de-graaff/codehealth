@@ -236,6 +236,7 @@ dependencies = [
  "codehealth-parser",
  "codehealth-reporters",
  "codehealth-rules",
+ "codehealth-rules-fastapi",
  "codehealth-rules-react",
  "codehealth-symbols",
  "codehealth-workspace",
@@ -356,7 +357,12 @@ name = "codehealth-rules-fastapi"
 version = "0.1.0"
 dependencies = [
  "codehealth-core",
+ "codehealth-parser",
  "codehealth-rules",
+ "codehealth-symbols",
+ "serde_json",
+ "sha2",
+ "tree-sitter",
 ]
 
 [[package]]

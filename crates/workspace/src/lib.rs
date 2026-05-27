@@ -244,13 +244,25 @@ impl ReactMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FastApiMetadata {
     pub via_dependency: bool,
+    pub via_import: bool,
     pub via_app_initialization: bool,
     pub via_router_initialization: bool,
+    pub via_route_decorator: bool,
+    pub via_dependency_injection: bool,
+    pub via_security_dependency: bool,
+    pub via_pydantic_model: bool,
 }
 
 impl FastApiMetadata {
     pub fn detected(&self) -> bool {
-        self.via_dependency || self.via_app_initialization || self.via_router_initialization
+        self.via_dependency
+            || self.via_import
+            || self.via_app_initialization
+            || self.via_router_initialization
+            || self.via_route_decorator
+            || self.via_dependency_injection
+            || self.via_security_dependency
+            || self.via_pydantic_model
     }
 }
 
@@ -822,11 +834,34 @@ fn observe_source_file(
 
     if language.eq_ignore_ascii_case("python") {
         if let Some(sample) = text_sample {
+            if sample.contains("from fastapi import") || sample.contains("import fastapi") {
+                metadata.fastapi.via_import = true;
+            }
             if sample.contains("FastAPI(") {
                 metadata.fastapi.via_app_initialization = true;
             }
             if sample.contains("APIRouter(") {
                 metadata.fastapi.via_router_initialization = true;
+            }
+            if sample.contains("@app.")
+                || sample.contains("@router.")
+                || sample.contains(".get(")
+                || sample.contains(".post(")
+            {
+                metadata.fastapi.via_route_decorator = true;
+            }
+            if sample.contains("Depends(") {
+                metadata.fastapi.via_dependency_injection = true;
+            }
+            if sample.contains("Security(")
+                || sample.contains("OAuth2")
+                || sample.contains("HTTPBearer")
+                || sample.contains("APIKey")
+            {
+                metadata.fastapi.via_security_dependency = true;
+            }
+            if sample.contains("BaseModel") || sample.contains("pydantic") {
+                metadata.fastapi.via_pydantic_model = true;
             }
         }
     }

@@ -227,7 +227,7 @@ pub enum FrameworkTag {
     ReactContextHook,
     ReactChildComponent(String),
     ReactJsxElement(String),
-    FastApiRoute(FastApiRouteMetadata),
+    FastApiRoute(Box<FastApiRouteMetadata>),
     FastApiDependency,
     PydanticModel,
 }
@@ -255,12 +255,17 @@ impl FrameworkTag {
 pub struct FastApiRouteMetadata {
     pub method: String,
     pub path: String,
+    pub raw_path: Option<String>,
+    pub router_variable: Option<String>,
+    pub router_prefix: Option<String>,
+    pub include_prefix: Option<String>,
     pub status_code: Option<String>,
     pub response_model: Option<String>,
     pub dependencies: Vec<String>,
     pub tags: Vec<String>,
     pub summary: Option<String>,
     pub description: Option<String>,
+    pub auth_dependency: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1122,8 +1127,10 @@ mod tests {
             ..FastApiRouteMetadata::default()
         };
         left.framework_tags
-            .push(FrameworkTag::FastApiRoute(route.clone()));
-        right.framework_tags.push(FrameworkTag::FastApiRoute(route));
+            .push(FrameworkTag::FastApiRoute(Box::new(route.clone())));
+        right
+            .framework_tags
+            .push(FrameworkTag::FastApiRoute(Box::new(route)));
         index.definitions.push(left);
         index.definitions.push(right);
         index.finalize();

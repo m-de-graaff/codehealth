@@ -4,11 +4,12 @@ use codehealth_parser::{
     QuerySpec, SyntaxTree,
 };
 use codehealth_symbols::{
-    populate_structural_fingerprints, Decorator, Definition as SymbolDefinition,
+    populate_structural_fingerprints, CallSite, Decorator, Definition as SymbolDefinition,
     DefinitionKind as SymbolDefinitionKind, FastApiRouteMetadata, FileSymbols, FrameworkTag,
     Import as SymbolImport, Language, Parameter, ReturnType, Signature, SymbolExtractor,
     SymbolRegistry, Visibility,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::Node;
 
 pub const QUERY_VERSION: u32 = 1;
@@ -79,11 +80,12 @@ pub fn register_symbols(registry: &mut SymbolRegistry) {
 }
 
 fn extract_symbols(tree: &SyntaxTree) -> FileSymbols {
+    let fastapi = FastApiFileContext::from_tree(tree);
     let mut symbols = FileSymbols {
         path: tree.source.path.clone(),
         definitions: extract_definitions_from_tree(tree)
             .into_iter()
-            .map(|definition| symbol_from_parser_definition(tree, definition))
+            .map(|definition| symbol_from_parser_definition(tree, definition, &fastapi))
             .collect(),
         imports: extract_imports_from_tree(tree)
             .into_iter()
@@ -97,6 +99,13 @@ fn extract_symbols(tree: &SyntaxTree) -> FileSymbols {
         left.file
             .cmp(&right.file)
             .then_with(|| left.span.start.cmp(&right.span.start))
+    });
+    collect_call_sites(tree.root_node(), tree, &mut symbols.call_sites);
+    symbols.call_sites.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then_with(|| left.span.start.cmp(&right.span.start))
+            .then_with(|| left.callee.cmp(&right.callee))
     });
     symbols
 }
@@ -115,12 +124,18 @@ fn extract_imports_from_tree(tree: &SyntaxTree) -> Vec<Import> {
     imports
 }
 
-fn symbol_from_parser_definition(tree: &SyntaxTree, definition: Definition) -> SymbolDefinition {
+fn symbol_from_parser_definition(
+    tree: &SyntaxTree,
+    definition: Definition,
+    fastapi: &FastApiFileContext,
+) -> SymbolDefinition {
     let text = tree.snippet(definition.span, 4096);
     let decorators = decorators_for_definition(tree, definition.span);
-    let route = decorators.iter().find_map(route_from_decorator);
+    let mut route = decorators
+        .iter()
+        .find_map(|decorator| route_from_decorator(decorator, fastapi));
     let is_pydantic = definition.kind == DefinitionKind::Class
-        && (text.contains("(BaseModel)") || text.contains("pydantic"));
+        && (text.contains("BaseModel") || text.contains("pydantic"));
     let has_dependency = text.contains("Depends(");
     let kind = if route.is_some() {
         SymbolDefinitionKind::FastApiRoute
@@ -163,10 +178,21 @@ fn symbol_from_parser_definition(tree: &SyntaxTree, definition: Definition) -> S
     symbol.visibility = Visibility::Private;
     symbol.is_async = definition.is_async;
     symbol.signature = parse_python_signature(&tree.snippet(signature_span, 1024));
+    if let Some(route) = route.as_mut() {
+        let dependency_defaults = dependency_defaults(&symbol.signature);
+        for dependency in &dependency_defaults {
+            if !route.dependencies.contains(dependency) {
+                route.dependencies.push(dependency.clone());
+            }
+        }
+        route.auth_dependency = security_dependency(&symbol.signature)
+            .or_else(|| security_dependency_from_source(&text))
+            .or_else(|| route.auth_dependency.clone());
+    }
     if let Some(route) = route {
         symbol
             .framework_tags
-            .push(FrameworkTag::FastApiRoute(route));
+            .push(FrameworkTag::FastApiRoute(Box::new(route)));
     }
     if has_dependency {
         symbol.framework_tags.push(FrameworkTag::FastApiDependency);
@@ -278,28 +304,124 @@ fn decorators_for_definition(tree: &SyntaxTree, span: codehealth_parser::Span) -
     decorators
 }
 
-fn route_from_decorator(decorator: &Decorator) -> Option<FastApiRouteMetadata> {
+#[derive(Debug, Default)]
+struct FastApiFileContext {
+    app_variables: BTreeSet<String>,
+    router_prefixes: BTreeMap<String, String>,
+    router_include_prefixes: BTreeMap<String, String>,
+}
+
+impl FastApiFileContext {
+    fn from_tree(tree: &SyntaxTree) -> Self {
+        let mut context = Self::default();
+        for line in tree.source.source.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((name, rest)) = trimmed.split_once('=') {
+                let name = name.trim();
+                let rest = rest.trim();
+                if is_identifier(name) && rest.starts_with("FastAPI(") {
+                    context.app_variables.insert(name.to_string());
+                }
+                if is_identifier(name) && rest.starts_with("APIRouter(") {
+                    let prefix = extract_between(rest, '(', ')')
+                        .and_then(|arguments| named_string_argument(&arguments, "prefix"))
+                        .unwrap_or_default();
+                    context.router_prefixes.insert(name.to_string(), prefix);
+                }
+            }
+            if let Some(arguments) = include_router_arguments(trimmed) {
+                let router = arguments
+                    .split(',')
+                    .next()
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if is_identifier(router) {
+                    let prefix = named_string_argument(arguments, "prefix").unwrap_or_default();
+                    context
+                        .router_include_prefixes
+                        .insert(router.to_string(), prefix);
+                }
+            }
+        }
+
+        context.app_variables.insert("app".to_string());
+        context
+            .router_prefixes
+            .entry("router".to_string())
+            .or_default();
+        context
+    }
+}
+
+fn route_from_decorator(
+    decorator: &Decorator,
+    fastapi: &FastApiFileContext,
+) -> Option<FastApiRouteMetadata> {
     let (owner, method) = decorator.name.split_once('.')?;
-    if !matches!(owner, "app" | "router") {
+    if !fastapi.app_variables.contains(owner) && !fastapi.router_prefixes.contains_key(owner) {
         return None;
     }
     let method = method.to_ascii_uppercase();
-    if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+    ) {
         return None;
     }
     let arguments = decorator.arguments.as_deref().unwrap_or_default();
+    let raw_path = first_string_literal(arguments).unwrap_or_else(|| "/".to_string());
+    let router_prefix = fastapi
+        .router_prefixes
+        .get(owner)
+        .filter(|prefix| !prefix.is_empty())
+        .cloned();
+    let include_prefix = fastapi
+        .router_include_prefixes
+        .get(owner)
+        .filter(|prefix| !prefix.is_empty())
+        .cloned();
+    let resolved_path = join_paths([
+        include_prefix.as_deref(),
+        router_prefix.as_deref(),
+        Some(raw_path.as_str()),
+    ]);
     Some(FastApiRouteMetadata {
         method,
-        path: first_string_literal(arguments).unwrap_or_else(|| "/".to_string()),
+        path: resolved_path,
+        raw_path: Some(raw_path),
+        router_variable: Some(owner.to_string()),
+        router_prefix,
+        include_prefix,
         status_code: named_argument(arguments, "status_code"),
         response_model: named_argument(arguments, "response_model"),
-        dependencies: named_argument(arguments, "dependencies")
-            .into_iter()
-            .collect(),
-        tags: named_argument(arguments, "tags").into_iter().collect(),
+        dependencies: dependency_calls(arguments),
+        tags: list_string_argument(arguments, "tags"),
         summary: named_string_argument(arguments, "summary"),
         description: named_string_argument(arguments, "description"),
+        auth_dependency: security_dependency_from_source(arguments),
     })
+}
+
+fn collect_call_sites(node: Node<'_>, tree: &SyntaxTree, calls: &mut Vec<CallSite>) {
+    if node.kind() == "call" {
+        if let Some(function) =
+            child_by_field_name(node, "function").or_else(|| node.named_child(0))
+        {
+            calls.push(CallSite {
+                language: Language::Python,
+                file: tree.source.path.clone(),
+                callee: tree.text_for_node(function).to_string(),
+                span: tree.span_for_node(node),
+            });
+        }
+    }
+
+    for child in named_children(node) {
+        collect_call_sites(child, tree, calls);
+    }
 }
 
 fn parse_python_signature(text: &str) -> Signature {
@@ -370,6 +492,138 @@ fn named_argument(text: &str, name: &str) -> Option<String> {
 
 fn named_string_argument(text: &str, name: &str) -> Option<String> {
     named_argument(text, name).map(|value| value.trim_matches(['"', '\'']).to_string())
+}
+
+fn list_string_argument(text: &str, name: &str) -> Vec<String> {
+    named_argument(text, name)
+        .map(|value| {
+            value
+                .trim_matches(['[', ']'])
+                .split(',')
+                .map(|part| part.trim().trim_matches(['"', '\'']))
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn dependency_defaults(signature: &Signature) -> Vec<String> {
+    let mut dependencies = Vec::new();
+    for parameter in &signature.parameters {
+        if let Some(default) = &parameter.default_value {
+            if default.contains("Depends(") || default.contains("Security(") {
+                dependencies.push(call_argument(default).unwrap_or_else(|| default.clone()));
+            }
+        }
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
+fn dependency_calls(text: &str) -> Vec<String> {
+    let mut dependencies = Vec::new();
+    for marker in ["Depends(", "Security("] {
+        for (index, _) in text.match_indices(marker) {
+            let start = index + marker.len();
+            let raw = text[start..]
+                .split(')')
+                .next()
+                .unwrap_or_default()
+                .split(',')
+                .next()
+                .unwrap_or_default()
+                .trim();
+            if !raw.is_empty() {
+                dependencies.push(raw.to_string());
+            }
+        }
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    dependencies
+}
+
+fn security_dependency(signature: &Signature) -> Option<String> {
+    signature.parameters.iter().find_map(|parameter| {
+        parameter.default_value.as_deref().and_then(|default| {
+            if default.contains("Security(")
+                || default.contains("OAuth2")
+                || default.contains("APIKey")
+                || default.contains("HTTPBearer")
+            {
+                call_argument(default).or_else(|| Some(default.to_string()))
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn security_dependency_from_source(text: &str) -> Option<String> {
+    for marker in ["Security(", "OAuth2", "APIKey", "HTTPBearer", "HTTPBasic"] {
+        if let Some(index) = text.find(marker) {
+            let rest = &text[index..];
+            return Some(
+                rest.split([',', ')', ']'])
+                    .next()
+                    .unwrap_or(marker)
+                    .trim()
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+fn call_argument(text: &str) -> Option<String> {
+    let start = text.find('(')? + 1;
+    let rest = &text[start..];
+    let argument = rest
+        .split(')')
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    (!argument.is_empty()).then(|| argument.to_string())
+}
+
+fn include_router_arguments(text: &str) -> Option<&str> {
+    let marker = ".include_router(";
+    let start = text.find(marker)? + marker.len();
+    let rest = &text[start..];
+    let end = rest.rfind(')').unwrap_or(rest.len());
+    Some(rest[..end].trim())
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn join_paths<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {
+    let mut output = String::new();
+    for part in parts.into_iter().flatten() {
+        let part = part.trim();
+        if part.is_empty() || part == "/" {
+            continue;
+        }
+        if !output.ends_with('/') {
+            output.push('/');
+        }
+        output.push_str(part.trim_matches('/'));
+    }
+    if output.is_empty() {
+        "/".to_string()
+    } else {
+        output
+    }
 }
 
 fn build_definition(

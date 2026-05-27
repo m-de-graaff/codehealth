@@ -44,6 +44,21 @@ pub const REACT_MIXED_DATA_FETCHING_AND_RENDERING: &str = "react.mixed_data_fetc
 pub const REACT_COMPONENT_TOO_MANY_RESPONSIBILITIES: &str =
     "react.component_too_many_responsibilities";
 pub const REACT_REDUNDANT_FRAGMENT: &str = "react.redundant_fragment";
+pub const FASTAPI_DUPLICATE_ROUTE: &str = "fastapi.duplicate.route";
+pub const FASTAPI_ROUTE_CONFLICT: &str = "fastapi.route_conflict";
+pub const FASTAPI_BLOCKING_CALL_IN_ASYNC_ROUTE: &str = "fastapi.blocking_call_in_async_route";
+pub const FASTAPI_MISSING_RESPONSE_MODEL: &str = "fastapi.missing_response_model";
+pub const FASTAPI_LARGE_ROUTE_HANDLER: &str = "fastapi.large_route_handler";
+pub const FASTAPI_BUSINESS_LOGIC_IN_ROUTE: &str = "fastapi.business_logic_in_route";
+pub const FASTAPI_REPEATED_DEPENDENCY_LOGIC: &str = "fastapi.repeated_dependency_logic";
+pub const FASTAPI_REPEATED_AUTH_LOGIC: &str = "fastapi.repeated_auth_logic";
+pub const FASTAPI_BROAD_EXCEPTION_IN_ROUTE: &str = "fastapi.broad_exception_in_route";
+pub const FASTAPI_INCONSISTENT_STATUS_CODE: &str = "fastapi.inconsistent_status_code";
+pub const FASTAPI_DUPLICATED_PYDANTIC_MODEL: &str = "fastapi.duplicated_pydantic_model";
+pub const FASTAPI_ROUTE_HANDLER_DUPLICATE_LOGIC: &str = "fastapi.route_handler_duplicate_logic";
+pub const FASTAPI_SYNC_DB_CALL_INSIDE_ASYNC_ROUTE: &str = "fastapi.sync_db_call_inside_async_route";
+pub const FASTAPI_REQUESTS_CALL_INSIDE_ASYNC_ROUTE: &str =
+    "fastapi.requests_call_inside_async_route";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleMetadata {
@@ -84,6 +99,12 @@ pub struct RuleExecutionConfig {
     pub react_max_component_lines: usize,
     pub react_max_props: usize,
     pub react_prop_drilling_depth: usize,
+    pub fastapi_enabled: bool,
+    pub fastapi_detect_duplicate_routes: bool,
+    pub fastapi_detect_blocking_async_calls: bool,
+    pub fastapi_require_response_model: String,
+    pub fastapi_blocking_call_allowlist: Vec<String>,
+    pub fastapi_blocking_call_patterns: Vec<String>,
     pub disabled_rules: BTreeSet<String>,
     pub options: BTreeMap<String, RuleOptionSettings>,
 }
@@ -116,6 +137,7 @@ pub struct RuleOptionSettings {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuleWorkspaceMetadata {
     pub react: RuleReactWorkspaceMetadata,
+    pub fastapi: RuleFastApiWorkspaceMetadata,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -127,6 +149,19 @@ pub struct RuleReactWorkspaceMetadata {
     pub via_vite_dependency: bool,
     pub via_remix_dependency: bool,
     pub source_directories: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleFastApiWorkspaceMetadata {
+    pub detected: bool,
+    pub via_dependency: bool,
+    pub via_import: bool,
+    pub via_app_initialization: bool,
+    pub via_router_initialization: bool,
+    pub via_route_decorator: bool,
+    pub via_dependency_injection: bool,
+    pub via_security_dependency: bool,
+    pub via_pydantic_model: bool,
 }
 
 #[derive(Debug)]
@@ -521,38 +556,118 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             "Finds fragments that wrap exactly one JSX child and can be removed safely.",
             AutofixSafety::Safe,
         ),
-        RuleMetadata {
-            code: "fastapi.duplicate.route",
-            aliases: &["fastapi.duplicate_route"],
-            name: "Duplicate FastAPI route",
-            description: "Finds FastAPI route handlers that register the same HTTP method and path.",
-            category: "fastapi",
-            kind: FindingKind::FastApi,
-            default_severity: Severity::High,
-            default_confidence: Confidence::Certain,
-            implemented: true,
-            language: Some("python"),
-            framework: Some("fastapi"),
-            explanation: "Finds FastAPI route handlers that register the same HTTP method and path.",
-            remediation: "Remove one route, merge the handlers, or change one path/method combination.",
-            detection_reason: "FastAPI route metadata is grouped by HTTP method and route path.",
-            autofix: AutofixSafety::SuggestionOnly,
-            autofix_explanation: "The tool cannot safely choose which route handler should own a duplicated API path.",
-        },
-        planned(
-            "fastapi.blocking_call_in_async_route",
+        fastapi_rule(
+            FASTAPI_DUPLICATE_ROUTE,
+            &["fastapi.duplicate_route"],
+            "Duplicate FastAPI route",
+            "Finds FastAPI route handlers that register the same HTTP method and resolved path.",
+            Severity::High,
+            Confidence::Certain,
+        ),
+        fastapi_rule(
+            FASTAPI_ROUTE_CONFLICT,
+            &[],
+            "FastAPI route conflict",
+            "Finds routes whose path templates can match the same request for the same method.",
+            Severity::High,
+            Confidence::High,
+        ),
+        fastapi_rule(
+            FASTAPI_BLOCKING_CALL_IN_ASYNC_ROUTE,
             &[],
             "Blocking call in async FastAPI route",
-            FindingKind::FastApi,
-        )
-        .with_framework("fastapi"),
-        planned(
-            "fastapi.missing.response_model",
-            &["fastapi.missing_response_model"],
+            "Finds common blocking calls inside async FastAPI route handlers.",
+            Severity::Medium,
+            Confidence::High,
+        ),
+        fastapi_rule(
+            FASTAPI_MISSING_RESPONSE_MODEL,
+            &["fastapi.missing.response_model"],
             "Missing FastAPI response model",
-            FindingKind::FastApi,
-        )
-        .with_framework("fastapi"),
+            "Finds JSON-like FastAPI routes without an explicit response_model.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_LARGE_ROUTE_HANDLER,
+            &[],
+            "Large FastAPI route handler",
+            "Finds route handlers whose body length exceeds the configured threshold.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_BUSINESS_LOGIC_IN_ROUTE,
+            &[],
+            "Business logic in FastAPI route",
+            "Finds route handlers that mix routing with domain/data orchestration signals.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_REPEATED_DEPENDENCY_LOGIC,
+            &[],
+            "Repeated FastAPI dependency logic",
+            "Finds repeated dependency lists across routes.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_REPEATED_AUTH_LOGIC,
+            &[],
+            "Repeated FastAPI auth logic",
+            "Finds repeated security dependency usage across routes.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_BROAD_EXCEPTION_IN_ROUTE,
+            &[],
+            "Broad exception in FastAPI route",
+            "Finds broad exception handlers inside route handlers.",
+            Severity::Medium,
+            Confidence::High,
+        ),
+        fastapi_rule(
+            FASTAPI_INCONSISTENT_STATUS_CODE,
+            &[],
+            "Inconsistent FastAPI status code",
+            "Finds status-code declarations that look inconsistent with route behavior.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_DUPLICATED_PYDANTIC_MODEL,
+            &[],
+            "Duplicated Pydantic model",
+            "Finds Pydantic models with identical field sets when names do not suggest intentional separation.",
+            Severity::Low,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_ROUTE_HANDLER_DUPLICATE_LOGIC,
+            &[],
+            "Duplicate FastAPI route-handler logic",
+            "Finds route handlers with duplicated structural bodies.",
+            Severity::Medium,
+            Confidence::High,
+        ),
+        fastapi_rule(
+            FASTAPI_SYNC_DB_CALL_INSIDE_ASYNC_ROUTE,
+            &[],
+            "Sync DB call inside async FastAPI route",
+            "Finds likely synchronous database calls inside async route handlers.",
+            Severity::Medium,
+            Confidence::Medium,
+        ),
+        fastapi_rule(
+            FASTAPI_REQUESTS_CALL_INSIDE_ASYNC_ROUTE,
+            &[],
+            "Requests call inside async FastAPI route",
+            "Finds requests.* calls inside async route handlers.",
+            Severity::Medium,
+            Confidence::High,
+        ),
         planned(
             "rust.unwrap_expect_policy",
             &[],
@@ -687,6 +802,35 @@ fn react_rule(
             AutofixSafety::SuggestionOnly => "Suggestion only. React refactors can change component boundaries, state lifetimes, or rendering behavior.",
             AutofixSafety::Unavailable => "No automated fix is available.",
         },
+    }
+}
+
+fn fastapi_rule(
+    code: &'static str,
+    aliases: &'static [&'static str],
+    name: &'static str,
+    description: &'static str,
+    default_severity: Severity,
+    default_confidence: Confidence,
+) -> RuleMetadata {
+    RuleMetadata {
+        code,
+        aliases,
+        name,
+        description,
+        category: "fastapi",
+        kind: FindingKind::FastApi,
+        default_severity,
+        default_confidence,
+        implemented: true,
+        language: Some("python"),
+        framework: Some("fastapi"),
+        explanation: description,
+        remediation: "Move reusable logic into dependencies/services, make async routes non-blocking, and keep API contracts explicit where applicable.",
+        detection_reason: "The FastAPI analyzer inspected route symbols, decorator metadata, dependency/security usage, calls, and route-handler structure.",
+        autofix: AutofixSafety::SuggestionOnly,
+        autofix_explanation:
+            "Suggestion only. FastAPI route changes can alter API behavior, dependency lifetimes, response schemas, or async execution semantics.",
     }
 }
 
