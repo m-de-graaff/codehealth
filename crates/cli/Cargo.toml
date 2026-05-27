@@ -25,7 +25,9 @@ codehealth-rules.workspace = true
 codehealth-symbols.workspace = true
 codehealth-workspace.workspace = true
 miette.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

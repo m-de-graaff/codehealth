@@ -4,9 +4,10 @@ use codehealth_parser::{
     QuerySpec, SyntaxTree,
 };
 use codehealth_symbols::{
-    Decorator, Definition as SymbolDefinition, DefinitionKind as SymbolDefinitionKind,
-    FastApiRouteMetadata, FileSymbols, FrameworkTag, Import as SymbolImport, Language, Parameter,
-    ReturnType, Signature, SymbolExtractor, SymbolRegistry, Visibility,
+    populate_structural_fingerprints, Decorator, Definition as SymbolDefinition,
+    DefinitionKind as SymbolDefinitionKind, FastApiRouteMetadata, FileSymbols, FrameworkTag,
+    Import as SymbolImport, Language, Parameter, ReturnType, Signature, SymbolExtractor,
+    SymbolRegistry, Visibility,
 };
 use tree_sitter::Node;
 
@@ -173,6 +174,7 @@ fn symbol_from_parser_definition(tree: &SyntaxTree, definition: Definition) -> S
     if is_pydantic {
         symbol.framework_tags.push(FrameworkTag::PydanticModel);
     }
+    populate_structural_fingerprints(tree, &mut symbol);
     symbol
 }
 

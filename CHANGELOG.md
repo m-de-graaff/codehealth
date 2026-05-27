@@ -2,21 +2,24 @@
 
 ## Unreleased
 
-- Add Phase 3 TOML configuration system with parent-directory discovery and explicit `--config`.
+- Add TOML configuration system with parent-directory discovery and explicit `--config`.
 - Add full default `codehealth.toml` generation through `codehealth init`.
 - Add config validation for unknown rule IDs, invalid rule levels, invalid enum values, and invalid glob patterns.
 - Add canonical rule IDs with backwards-compatible aliases.
 - Add project language filtering, ignored paths, rule severity overrides, rule include/exclude paths, and path overrides.
 - Add inline next-line and block suppressions plus `--show-suppressed`.
-- Add Phase 2 CLI command surface: `scan`, `dupes`, `rules`, `init`, `config validate`, `explain`, and hidden debug commands.
-- Add text, JSON, SARIF, and standalone HTML report rendering.
+- Add CLI command surface: `scan`, `dupes`, `rules`, `init`, `config validate`, `explain`, and hidden debug commands.
+- Add text, stable JSON, SARIF, standalone HTML, and Markdown report rendering.
 - Add colored severity output with `--color auto|always|never`.
 - Add severity, confidence, language, framework, CI, cache, and autofix flags.
 - Add shallow `duplicate.exact_file` detector for exact whitespace-normalized whole-file duplicates.
 - Add stable report schema with stats, score, multi-location findings, explanations, remediation, and baseline keys.
+- Add schema v2 structured health scoring with category scores, top contributors, summary metrics, baseline comparison counts, and `--no-score`.
+- Add public JSON report schema `1.0.0`, report timing/config hash metadata, GitHub-oriented SARIF related locations, and PR-comment Markdown summaries.
+- Add baseline creation, intentional baseline updates, per-finding baseline status, fixed finding reporting, and `codehealth ci --fail-on new-high`.
 
 ## 0.1.0
 
 - Bootstrap Rust workspace and CLI shell.
-- Add Phase 0 product documentation.
+- Add product documentation.
 - Add file discovery, config, parser registry, reporter, and test scaffolding.

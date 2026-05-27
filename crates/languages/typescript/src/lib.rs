@@ -4,9 +4,10 @@ use codehealth_parser::{
     LanguageParser, LanguageRegistry, QueryKind, QuerySpec, SyntaxTree,
 };
 use codehealth_symbols::{
-    Attribute, CallSite, Definition as SymbolDefinition, DefinitionKind as SymbolDefinitionKind,
-    Export, FileSymbols, FrameworkTag, Import as SymbolImport, Language, Parameter, ReturnType,
-    Signature, SymbolExtractor, SymbolRegistry, Visibility,
+    populate_structural_fingerprints, Attribute, CallSite, Definition as SymbolDefinition,
+    DefinitionKind as SymbolDefinitionKind, Export, FileSymbols, FrameworkTag,
+    Import as SymbolImport, Language, Parameter, ReturnType, Signature, SymbolExtractor,
+    SymbolRegistry, Visibility,
 };
 use tree_sitter::Node;
 
@@ -189,6 +190,7 @@ fn symbol_from_parser_definition(
     symbol.signature = parse_signature(tree.snippet(signature_span, 512).as_str());
     symbol.attributes = attributes_from_text(tree.snippet(symbol.span, 512).as_str(), symbol.span);
     add_react_tags(tree, &mut symbol);
+    populate_structural_fingerprints(tree, &mut symbol);
     symbol
 }
 

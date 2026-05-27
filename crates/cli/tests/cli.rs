@@ -64,9 +64,311 @@ fn scan_json_report_works() {
 
     let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
 
-    assert_eq!(json["schema_version"], 1);
-    assert!(json["stats"]["files_scanned"].as_u64().expect("number") >= 8);
+    assert_eq!(json["schemaVersion"], "1.0.0");
+    assert_eq!(json["toolVersion"], env!("CARGO_PKG_VERSION"));
+    assert!(json["configHash"].as_str().expect("config hash").len() >= 64);
+    assert_eq!(json["score"]["enabled"], true);
+    assert!(json["score"]["overall"].as_u64().expect("score") <= 100);
+    assert!(json["metrics"]["linesScanned"].as_u64().expect("lines") > 0);
+    assert!(json["metrics"]["filesScanned"].as_u64().expect("number") >= 8);
+    assert!(json["timing"]["scanMs"].as_u64().is_some());
     assert!(!json["findings"].as_array().expect("array").is_empty());
+}
+
+#[test]
+fn score_can_be_disabled_for_one_run() {
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .arg("--no-score")
+        .assert()
+        .success()
+        .stdout(contains("Score: disabled"));
+}
+
+#[test]
+fn config_can_disable_score() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [scoring]
+            enabled = false
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("Score: disabled"));
+}
+
+#[test]
+fn config_can_select_markdown_report_format() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [report]
+            default_format = "markdown"
+        "#,
+    )
+    .expect("write config");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("# Code Health Summary"));
+}
+
+#[test]
+fn report_counts_new_findings_when_baseline_exists() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let baseline = temp.path().join("baseline.json");
+    std::fs::write(&baseline, r#"{"findings":[]}"#).expect("write baseline");
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .arg("--baseline")
+        .arg(&baseline)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
+
+    assert_eq!(json["metrics"]["baseline"]["status"], "compared");
+    assert!(
+        json["metrics"]["baseline"]["newFindings"]
+            .as_u64()
+            .expect("new findings")
+            > 0
+    );
+    assert!(
+        json["score"]["categories"]["ciRisk"]["score"]
+            .as_u64()
+            .expect("ci risk score")
+            < 100
+    );
+}
+
+#[test]
+fn write_baseline_creates_stable_entries_with_owner() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.ts"), "export const value = 1;\n").expect("write a");
+    std::fs::write(temp.path().join("b.ts"), "export const value = 1;\n").expect("write b");
+    let baseline = temp.path().join(".codehealth/baseline.json");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--write-baseline")
+        .arg(&baseline)
+        .arg("--baseline-owner")
+        .arg("platform")
+        .assert()
+        .success();
+
+    let raw = std::fs::read_to_string(baseline).expect("baseline exists");
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("valid baseline");
+    let entries = json["entries"].as_array().expect("entries");
+
+    assert_eq!(json["schemaVersion"], "1.0.0");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["ruleId"], "duplicate.exact.file");
+    assert_eq!(entries[0]["owner"], "platform");
+    assert!(
+        entries[0]["fingerprint"]
+            .as_str()
+            .expect("fingerprint")
+            .len()
+            >= 64
+    );
+    assert!(entries[0]["firstSeen"].as_u64().expect("first seen") > 0);
+    assert_eq!(
+        entries[0]["relatedLocations"]
+            .as_array()
+            .expect("related")
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn ci_allows_existing_findings_and_fails_new_high_findings() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.ts"), "export const value = 1;\n").expect("write a");
+    std::fs::write(temp.path().join("b.ts"), "export const value = 1;\n").expect("write b");
+    let baseline = temp.path().join(".codehealth/baseline.json");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--write-baseline")
+        .arg(&baseline)
+        .assert()
+        .success();
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("ci")
+        .arg(temp.path())
+        .arg("--baseline")
+        .arg(&baseline)
+        .arg("--fail-on")
+        .arg("new-high")
+        .assert()
+        .success();
+
+    std::fs::write(temp.path().join("c.ts"), "export const other = 2;\n").expect("write c");
+    std::fs::write(temp.path().join("d.ts"), "export const other = 2;\n").expect("write d");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("ci")
+        .arg(temp.path())
+        .arg("--baseline")
+        .arg(&baseline)
+        .arg("--fail-on")
+        .arg("new-high")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(contains("New findings: 1"));
+}
+
+#[test]
+fn fixed_findings_are_reported_against_baseline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.ts"), "export const value = 1;\n").expect("write a");
+    std::fs::write(temp.path().join("b.ts"), "export const value = 1;\n").expect("write b");
+    let baseline = temp.path().join(".codehealth/baseline.json");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--write-baseline")
+        .arg(&baseline)
+        .assert()
+        .success();
+    std::fs::remove_file(temp.path().join("b.ts")).expect("remove duplicate");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--baseline")
+        .arg(&baseline)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
+
+    assert_eq!(json["metrics"]["baseline"]["fixedFindings"], 1);
+    assert_eq!(
+        json["metrics"]["baseline"]["fixed"]
+            .as_array()
+            .expect("fixed")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn formatting_only_changes_do_not_create_new_ci_findings() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.ts"), "export const value = 1;\n").expect("write a");
+    std::fs::write(temp.path().join("b.ts"), "export const value = 1;\n").expect("write b");
+    let baseline = temp.path().join(".codehealth/baseline.json");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--write-baseline")
+        .arg(&baseline)
+        .assert()
+        .success();
+    std::fs::write(
+        temp.path().join("b.ts"),
+        "export   const   value    =    1;\n\n",
+    )
+    .expect("format b");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("ci")
+        .arg(temp.path())
+        .arg("--baseline")
+        .arg(&baseline)
+        .arg("--fail-on")
+        .arg("new-high")
+        .assert()
+        .success()
+        .stdout(contains("New findings: 0"));
+}
+
+#[test]
+fn moved_duplicate_group_is_changed_not_new() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("a.ts"), "export const value = 1;\n").expect("write a");
+    std::fs::write(temp.path().join("b.ts"), "export const value = 1;\n").expect("write b");
+    let baseline = temp.path().join(".codehealth/baseline.json");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--write-baseline")
+        .arg(&baseline)
+        .assert()
+        .success();
+    std::fs::rename(temp.path().join("b.ts"), temp.path().join("c.ts")).expect("rename b");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--baseline")
+        .arg(&baseline)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
+
+    assert_eq!(json["metrics"]["baseline"]["newFindings"], 0);
+    assert_eq!(json["metrics"]["baseline"]["changedFindings"], 1);
+    assert_eq!(json["findings"][0]["baselineStatus"], "changed");
 }
 
 #[test]
@@ -311,7 +613,7 @@ fn exact_symbol_body_json_metadata_is_stable() {
         .as_array()
         .expect("findings array")
         .iter()
-        .find(|finding| finding["rule_id"] == "duplicate.exact.body")
+        .find(|finding| finding["ruleId"] == "duplicate.exact.body")
         .expect("exact body finding");
 
     assert_eq!(exact_body["metadata"]["names_differ"], true);
@@ -332,6 +634,212 @@ fn exact_symbol_body_json_metadata_is_stable() {
         exact_body["metadata"]["symbol_names"],
         serde_json::json!(["left", "right"])
     );
+}
+
+#[test]
+fn scan_reports_structural_typescript_duplicates_after_parameter_renaming() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("math.ts"),
+        r#"
+export function add(x: number, y: number): number {
+  return x + y;
+}
+
+export function sum(a: number, b: number): number {
+  return a + b;
+}
+"#,
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--color")
+        .arg("never")
+        .assert()
+        .success()
+        .stdout(contains("MEDIUM  duplicate.structural.function"))
+        .stdout(contains("Symbols: add, sum"))
+        .stdout(contains("Domain warning"));
+}
+
+#[test]
+fn scan_reports_structural_python_member_duplicates_with_domain_warning() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("policy.py"),
+        r#"
+def is_adult(user):
+    return user.age >= 18
+
+def can_vote(person):
+    return person.age >= 18
+"#,
+    )
+    .expect("write python");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--color")
+        .arg("never")
+        .assert()
+        .success()
+        .stdout(contains("MEDIUM  duplicate.structural.function"))
+        .stdout(contains("Symbols: can_vote, is_adult"))
+        .stdout(contains(
+            "same shape can still represent intentionally separate behavior",
+        ));
+}
+
+#[test]
+fn structural_duplicates_do_not_flag_tiny_trivial_bodies_by_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("tiny.ts"),
+        r#"
+export function left(): boolean {
+  return true;
+}
+
+export function right(): boolean {
+  return true;
+}
+"#,
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--color")
+        .arg("never")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("duplicate.structural.function").not());
+}
+
+#[test]
+fn config_can_disable_structural_duplicates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("math.ts"),
+        r#"
+export function add(x: number, y: number): number {
+  return x + y;
+}
+
+export function sum(a: number, b: number): number {
+  return a + b;
+}
+"#,
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("Findings: 0"));
+}
+
+#[test]
+fn structural_duplicate_json_metadata_is_stable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("math.ts"),
+        r#"
+export function add(x: number, y: number): number {
+  return x + y;
+}
+
+export function sum(a: number, b: number): number {
+  return a + b;
+}
+"#,
+    )
+    .expect("write ts");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
+    let structural = json["findings"]
+        .as_array()
+        .expect("findings array")
+        .iter()
+        .find(|finding| finding["ruleId"] == "duplicate.structural.function")
+        .expect("structural finding");
+
+    assert_eq!(structural["metadata"]["names_differ"], true);
+    assert_eq!(structural["metadata"]["parameter_count"], 2);
+    assert!(structural["metadata"]["canonical_hash"].as_str().is_some());
+    assert!(
+        structural["metadata"]["node_count"]
+            .as_u64()
+            .expect("node count")
+            >= 5
+    );
+    assert_eq!(
+        structural["metadata"]["symbol_names"],
+        serde_json::json!(["add", "sum"])
+    );
+}
+
+#[test]
+fn debug_canonical_explains_identifier_slots_and_member_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("policy.ts");
+    std::fs::write(
+        &file,
+        r#"
+export function isAdult(user: { age: number }): boolean {
+  return user.age >= 18;
+}
+"#,
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("debug")
+        .arg("canonical")
+        .arg(&file)
+        .arg("--symbol")
+        .arg("isAdult")
+        .assert()
+        .success()
+        .stdout(contains("Canonical hash"))
+        .stdout(contains("user -> PARAM_0"))
+        .stdout(contains("PARAM_0.age"));
 }
 
 #[test]
@@ -369,7 +877,7 @@ async def read_user(user_id: int) -> dict[str, int]:
 }
 
 #[test]
-fn sarif_and_html_formats_render() {
+fn sarif_html_and_markdown_formats_render() {
     let mut sarif = Command::cargo_bin("codehealth").expect("binary exists");
     sarif
         .arg("scan")
@@ -388,6 +896,16 @@ fn sarif_and_html_formats_render() {
         .assert()
         .success()
         .stdout(contains("<!doctype html>"));
+
+    let mut markdown = Command::cargo_bin("codehealth").expect("binary exists");
+    markdown
+        .arg("scan")
+        .arg(fixture("duplicates"))
+        .arg("--format")
+        .arg("markdown")
+        .assert()
+        .success()
+        .stdout(contains("# Code Health Summary"));
 }
 
 #[test]
@@ -461,6 +979,7 @@ fn config_can_disable_exact_duplicates() {
             [duplication]
             detect_exact = false
             detect_names = false
+            detect_structural = false
         "#,
     )
     .expect("write config");
@@ -514,6 +1033,7 @@ fn ignore_paths_remove_files_from_scan() {
 
             [rules]
             "duplicate.name.function" = "off"
+            "duplicate.structural.function" = "off"
         "#,
     )
     .expect("write config");
@@ -664,6 +1184,7 @@ fn suppressions_hide_findings_by_default_and_can_be_shown() {
         r#"
             [duplication]
             detect_names = false
+            detect_structural = false
         "#,
     )
     .expect("write config");
@@ -706,6 +1227,7 @@ fn config_discovery_walks_parent_directories() {
             [rules]
             "duplicate.exact.file" = "off"
             "duplicate.name.function" = "off"
+            "duplicate.structural.function" = "off"
         "#,
     )
     .expect("write config");

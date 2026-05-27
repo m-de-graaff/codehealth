@@ -237,7 +237,9 @@ dependencies = [
  "codehealth-workspace",
  "miette",
  "predicates",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -327,6 +329,8 @@ name = "codehealth-reporters"
 version = "0.1.0"
 dependencies = [
  "codehealth-core",
+ "codehealth-rules",
+ "serde",
  "serde_json",
  "thiserror",
 ]
@@ -361,8 +365,10 @@ dependencies = [
  "codehealth-core",
  "codehealth-parser",
  "insta",
+ "serde",
  "serde_json",
  "sha2",
+ "tree-sitter",
 ]
 
 [[package]]

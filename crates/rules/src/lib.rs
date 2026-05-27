@@ -119,12 +119,22 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             "Duplicate Rust impl method name",
         )
         .with_language("rust"),
-        planned(
-            "duplicate.structural.function",
-            &["duplicate.structural_function"],
-            "Structural duplicate function",
-            FindingKind::StructuralDuplicate,
-        ),
+        RuleMetadata {
+            code: "duplicate.structural.function",
+            aliases: &["duplicate.structural_function"],
+            name: "Structural duplicate function",
+            kind: FindingKind::StructuralDuplicate,
+            default_severity: Severity::Medium,
+            default_confidence: Confidence::High,
+            implemented: true,
+            language: None,
+            framework: None,
+            explanation: "Finds functions, methods, components, hooks, and route handlers with the same canonical AST after parameter and local identifier normalization.",
+            remediation: "Compare domain intent, then extract a shared helper, consolidate behind one exported function, or suppress intentional duplication with a reason.",
+            detection_reason: "Definitions are grouped by a canonical AST fingerprint that preserves member/API names while normalizing local identifiers.",
+            autofix: AutofixSafety::SuggestionOnly,
+            autofix_explanation: "Structural duplicates are not auto-fixed because same shape can still represent intentionally separate domain behavior, public APIs, ownership rules, or side effects.",
+        },
         planned(
             "duplicate.near.function",
             &["duplicate.near_function"],

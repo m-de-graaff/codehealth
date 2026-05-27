@@ -4,9 +4,9 @@ use codehealth_parser::{
     LanguageParser, LanguageRegistry, QueryKind, QuerySpec, SyntaxTree,
 };
 use codehealth_symbols::{
-    Attribute, Definition as SymbolDefinition, DefinitionKind as SymbolDefinitionKind, FileSymbols,
-    Import as SymbolImport, Language, Parameter, ReturnType, Signature, SymbolExtractor,
-    SymbolRegistry, Visibility,
+    populate_structural_fingerprints, Attribute, Definition as SymbolDefinition,
+    DefinitionKind as SymbolDefinitionKind, FileSymbols, Import as SymbolImport, Language,
+    Parameter, ReturnType, Signature, SymbolExtractor, SymbolRegistry, Visibility,
 };
 use tree_sitter::Node;
 
@@ -153,6 +153,7 @@ fn symbol_from_parser_definition(tree: &SyntaxTree, definition: Definition) -> S
     symbol.is_async = definition.is_async;
     symbol.signature = parse_rust_signature(&tree.snippet(symbol.signature_span.unwrap(), 512));
     symbol.attributes = attributes_before_span(tree, definition.span);
+    populate_structural_fingerprints(tree, &mut symbol);
     symbol
 }
 

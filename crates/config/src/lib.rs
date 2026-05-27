@@ -29,6 +29,9 @@ detect_semantic_candidates = false
 min_tokens = 40
 min_lines = 5
 min_confidence = "medium"
+structural_normalize_literals = false
+structural_min_nodes = 5
+structural_max_opaque_percent = 25
 
 [style]
 simplify_boolean_returns = true
@@ -61,6 +64,7 @@ detect_javascript = true
 [ci]
 fail_on = ["new_high"]
 baseline = ".codehealth/baseline.json"
+# baseline_owner = "platform"
 
 [ignore]
 paths = [
@@ -90,7 +94,7 @@ paths = [
 "duplicate.name.fastapi_route_handler" = "warn"
 "duplicate.name.rust_type" = "warn"
 "duplicate.name.rust_impl_method" = "warn"
-"duplicate.structural.function" = "error"
+"duplicate.structural.function" = "warn"
 "style.boolean_return_simplifiable" = "warn"
 "react.large.component" = "warn"
 "fastapi.duplicate.route" = "error"
@@ -105,9 +109,18 @@ min_lines = 5
 include_paths = []
 exclude_paths = []
 
+[rule_options."duplicate.structural.function"]
+min_tokens = 5
+min_lines = 1
+include_paths = []
+exclude_paths = []
+
 [report]
 default_format = "text"
 color = "auto"
+
+[scoring]
+enabled = true
 
 [cache]
 enabled = true
@@ -138,6 +151,7 @@ pub struct CodehealthConfig {
     pub rule_options: BTreeMap<String, RuleOptions>,
     pub path_overrides: Vec<PathOverride>,
     pub report: ReportConfig,
+    pub scoring: ScoringConfig,
     pub cache: CacheConfig,
 }
 
@@ -187,12 +201,17 @@ impl CodehealthConfig {
         validate_languages(&self.project.languages)?;
         validate_frameworks(&self.project.frameworks)?;
         validate_fail_on(&self.ci.fail_on)?;
+        validate_report_format(&self.report.default_format)?;
         validate_response_model_level(&self.fastapi.require_response_model)?;
         validate_patterns(&self.scanner.include, "scanner.include")?;
         validate_patterns(&self.scanner.exclude, "scanner.exclude")?;
         validate_positive_size(
             self.scanner.max_file_size_bytes,
             "scanner.max_file_size_bytes",
+        )?;
+        validate_percentage(
+            self.duplication.structural_max_opaque_percent,
+            "duplication.structural_max_opaque_percent",
         )?;
 
         self.rules = canonicalize_rule_map(&self.rules, "rules")?;
@@ -315,6 +334,9 @@ pub struct DuplicationConfig {
     pub min_tokens: usize,
     pub min_lines: usize,
     pub min_confidence: Confidence,
+    pub structural_normalize_literals: bool,
+    pub structural_min_nodes: usize,
+    pub structural_max_opaque_percent: u8,
 }
 
 impl Default for DuplicationConfig {
@@ -329,6 +351,9 @@ impl Default for DuplicationConfig {
             min_tokens: 40,
             min_lines: 5,
             min_confidence: Confidence::Medium,
+            structural_normalize_literals: false,
+            structural_min_nodes: 5,
+            structural_max_opaque_percent: 25,
         }
     }
 }
@@ -432,6 +457,7 @@ pub struct CiConfig {
     pub fail_on: Vec<String>,
     pub baseline: Option<PathBuf>,
     pub block_new_findings_only: bool,
+    pub baseline_owner: Option<String>,
 }
 
 impl Default for CiConfig {
@@ -440,6 +466,7 @@ impl Default for CiConfig {
             fail_on: Vec::new(),
             baseline: Some(PathBuf::from(".codehealth/baseline.json")),
             block_new_findings_only: true,
+            baseline_owner: None,
         }
     }
 }
@@ -484,6 +511,19 @@ impl Default for ReportConfig {
             default_format: "text".to_string(),
             color: "auto".to_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct ScoringConfig {
+    pub enabled: bool,
+}
+
+impl Default for ScoringConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -800,6 +840,11 @@ fn validate_fail_on(values: &[String]) -> Result<(), ConfigError> {
     validate_enum_list("ci.fail_on", values, &allowed)
 }
 
+fn validate_report_format(value: &str) -> Result<(), ConfigError> {
+    let allowed = ["text", "json", "sarif", "html", "markdown", "md"];
+    validate_enum_list("report.default_format", &[value.to_string()], &allowed)
+}
+
 fn validate_response_model_level(value: &str) -> Result<(), ConfigError> {
     let allowed = ["off", "warn", "error"];
     validate_enum_list(
@@ -815,6 +860,19 @@ fn validate_positive_size(value: u64, context: &str) -> Result<(), ConfigError> 
             context: context.to_string(),
             value: value.to_string(),
             expected: vec!["positive integer".to_string()],
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
+fn validate_percentage(value: u8, context: &str) -> Result<(), ConfigError> {
+    if value > 100 {
+        return Err(ConfigValidationError::InvalidValue {
+            context: context.to_string(),
+            value: value.to_string(),
+            expected: vec!["integer from 0 through 100".to_string()],
         }
         .into());
     }
@@ -1003,6 +1061,7 @@ mod tests {
         assert_eq!(loaded.config.scanner.max_file_size_bytes, 1024 * 1024);
         assert!(loaded.config.scanner.detect_javascript);
         assert!(loaded.config.ci.block_new_findings_only);
+        assert!(loaded.config.scoring.enabled);
     }
 
     #[test]
@@ -1016,6 +1075,7 @@ mod tests {
             config.rules.get("duplicate.exact.file"),
             Some(&RuleLevel::Severity(Severity::High))
         );
+        assert!(config.scoring.enabled);
     }
 
     #[test]
@@ -1032,6 +1092,49 @@ mod tests {
             config.rules.get("duplicate.exact.file"),
             Some(&RuleLevel::Off)
         );
+    }
+
+    #[test]
+    fn parses_scoring_enabled_flag() {
+        let raw = r#"
+            [scoring]
+            enabled = false
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
+
+        config
+            .normalize_and_validate()
+            .expect("valid scoring config");
+
+        assert!(!config.scoring.enabled);
+    }
+
+    #[test]
+    fn accepts_markdown_report_format() {
+        let raw = r#"
+            [report]
+            default_format = "markdown"
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
+
+        config
+            .normalize_and_validate()
+            .expect("valid report format");
+
+        assert_eq!(config.report.default_format, "markdown");
+    }
+
+    #[test]
+    fn parses_baseline_owner() {
+        let raw = r#"
+            [ci]
+            baseline_owner = "platform"
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
+
+        config.normalize_and_validate().expect("valid ci config");
+
+        assert_eq!(config.ci.baseline_owner.as_deref(), Some("platform"));
     }
 
     #[test]

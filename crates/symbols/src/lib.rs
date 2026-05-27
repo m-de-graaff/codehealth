@@ -10,6 +10,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod canonical;
+
+pub use canonical::*;
+
 pub const DUPLICATE_NAME_FUNCTION_RULE: &str = "duplicate.name.function";
 pub const DUPLICATE_NAME_RULE: &str = DUPLICATE_NAME_FUNCTION_RULE;
 pub const DUPLICATE_NAME_CLASS_RULE: &str = "duplicate.name.class";
@@ -118,6 +122,8 @@ pub struct Definition {
     pub attributes: Vec<Attribute>,
     pub framework_tags: Vec<FrameworkTag>,
     pub signature: Signature,
+    pub structural_fingerprint: Option<StructuralFingerprint>,
+    pub literal_normalized_structural_fingerprint: Option<StructuralFingerprint>,
 }
 
 impl Definition {
@@ -150,6 +156,8 @@ impl Definition {
             attributes: Vec::new(),
             framework_tags: Vec::new(),
             signature: Signature::default(),
+            structural_fingerprint: None,
+            literal_normalized_structural_fingerprint: None,
         }
     }
 }

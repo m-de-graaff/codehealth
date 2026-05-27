@@ -5,27 +5,36 @@ use codehealth_config::{
     LoadedConfig, SuppressionDirective, DEFAULT_CONFIG_FILE,
 };
 use codehealth_core::{
-    Confidence, Finding, FindingFilters, ScanMode, ScanResult, Severity, Suppression,
-    SuppressionKind,
+    BaselineSummary, ComplexityMetric, Confidence, DefinitionMetric, Finding, FindingFilters,
+    FindingKind, ModuleDuplicateMetric, ScanMode, ScanResult, ScoreOptions, Severity,
+    SummaryMetrics, SuppressedRuleMetric, Suppression, SuppressionKind,
 };
 use codehealth_duplication::{
-    find_exact_body_duplicates, find_exact_file_duplicates, fingerprint_normalized_body,
-    normalize_body_source, normalize_source, token_estimate, DuplicateInput, ExactBodyOptions,
+    find_exact_body_duplicates, find_exact_file_duplicates, find_structural_duplicates,
+    fingerprint_normalized_body, normalize_body_source, normalize_source, token_estimate,
+    DuplicateInput, ExactBodyOptions, StructuralOptions,
 };
 use codehealth_parser::{run_query, LanguageRegistry, QueryKind, SourceFile, SyntaxTree};
-use codehealth_reporters::{render_result, ReportFormat, ReportOptions};
+use codehealth_reporters::{
+    render_result_with_context, ReportContext, ReportFormat, ReportOptions, ReportTiming,
+};
 use codehealth_rules::{canonical_rule_id, find_rule, rule_catalog};
 use codehealth_symbols::{
     build_symbol_index, find_duplicate_fastapi_route_findings, find_duplicate_name_findings,
-    Language as SymbolLanguage, SymbolIndex, SymbolInput, SymbolRegistry,
+    Definition, DefinitionKind, Language as SymbolLanguage, SymbolIndex, SymbolInput,
+    SymbolRegistry,
 };
 use codehealth_workspace::{scan_workspace, WorkspaceFile, WorkspaceScan, WorkspaceScanOptions};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::IsTerminal,
     path::{Path, PathBuf},
     process::ExitCode,
+    time::{Duration, Instant},
 };
+
+mod baseline;
 
 fn main() -> ExitCode {
     match run() {
@@ -47,6 +56,7 @@ fn run() -> anyhow::Result<u8> {
             Ok(0)
         }
         Some(Command::Scan(args)) => run_scan(args, ScanMode::All),
+        Some(Command::Ci(args)) => run_ci(args),
         Some(Command::Dupes(args)) => run_scan(args, ScanMode::DuplicatesOnly),
         Some(Command::Rules(args)) => run_rules(args),
         Some(Command::Init(args)) => run_init(args),
@@ -68,6 +78,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Scan(RunArgs),
+    Ci(RunArgs),
     Dupes(RunArgs),
     Rules(RulesArgs),
     Init(InitArgs),
@@ -114,6 +125,18 @@ struct RunArgs {
     #[arg(long)]
     baseline: Option<PathBuf>,
 
+    #[arg(long)]
+    write_baseline: Option<PathBuf>,
+
+    #[arg(long)]
+    update_baseline: bool,
+
+    #[arg(long)]
+    force_baseline: bool,
+
+    #[arg(long)]
+    baseline_owner: Option<String>,
+
     #[arg(long, value_parser = parse_jobs)]
     jobs: Option<usize>,
 
@@ -134,6 +157,9 @@ struct RunArgs {
 
     #[arg(long)]
     show_suppressed: bool,
+
+    #[arg(long)]
+    no_score: bool,
 
     #[arg(long)]
     config: Option<PathBuf>,
@@ -177,6 +203,7 @@ enum DebugCommand {
     Parse(DebugFileArgs),
     Symbols(DebugFileArgs),
     Fingerprints(DebugFileArgs),
+    Canonical(DebugCanonicalArgs),
     Ast(DebugFileArgs),
     Query(DebugQueryArgs),
     Workspace(DebugWorkspaceArgs),
@@ -185,6 +212,23 @@ enum DebugCommand {
 #[derive(Debug, Args)]
 struct DebugFileArgs {
     file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct DebugCanonicalArgs {
+    file: PathBuf,
+
+    #[arg(long)]
+    symbol: Option<String>,
+
+    #[arg(long, value_enum, default_value_t = DebugDumpFormat::Text)]
+    format: DebugDumpFormat,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DebugDumpFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Args)]
@@ -210,6 +254,7 @@ enum OutputFormat {
     Json,
     Sarif,
     Html,
+    Markdown,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -233,6 +278,7 @@ impl OutputFormat {
             "json" => Self::Json,
             "sarif" => Self::Sarif,
             "html" => Self::Html,
+            "markdown" | "md" => Self::Markdown,
             _ => Self::Text,
         }
     }
@@ -245,6 +291,7 @@ impl From<OutputFormat> for ReportFormat {
             OutputFormat::Json => Self::Json,
             OutputFormat::Sarif => Self::Sarif,
             OutputFormat::Html => Self::Html,
+            OutputFormat::Markdown => Self::Markdown,
         }
     }
 }
@@ -347,14 +394,28 @@ enum FailOn {
 }
 
 fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
+    run_scan_with_options(args, mode, false)
+}
+
+fn run_ci(args: RunArgs) -> anyhow::Result<u8> {
+    run_scan_with_options(args, ScanMode::All, true)
+}
+
+fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow::Result<u8> {
+    let scan_started = Instant::now();
     let cwd = std::env::current_dir().context("failed to determine current directory")?;
     let loaded_config = CodehealthConfig::load_with_metadata(args.config.as_deref(), &cwd)
         .context("failed to load codehealth config")?;
     let config = &loaded_config.config;
+    if args.write_baseline.is_some() && args.update_baseline {
+        bail!("--write-baseline and --update-baseline cannot be used together");
+    }
+    let config_hash = config_hash(config).context("failed to hash effective config")?;
     let format = args
         .format
         .unwrap_or_else(|| OutputFormat::from_config(&config.report.default_format));
     let filters = filters_from_args(&args);
+    let fail_on_values = effective_fail_on_values(args.fail_on, &loaded_config, ci_mode);
 
     let registry = build_language_registry();
     let workspace_scan = scan_workspace(
@@ -369,12 +430,14 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
     result.stats.config_files = workspace_scan.config_files.len();
     let files = workspace_scan.files;
     result.stats.files_scanned = files.len();
+    let generated_paths = generated_source_paths(&files);
 
     let symbol_registry = build_symbol_registry();
     let should_index_symbols = mode == ScanMode::All
         || (config.duplication.enabled
             && (config.duplication.detect_names
                 || config.duplication.detect_exact
+                || config.duplication.detect_structural
                 || (config.fastapi.enabled && config.fastapi.detect_duplicate_routes)));
     let symbol_index = if should_index_symbols {
         let build = build_symbol_index(
@@ -406,6 +469,7 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
         }
     };
 
+    let mut suppressed_rule_counts = BTreeMap::new();
     result.findings = apply_config_policy(
         findings,
         &result.root,
@@ -413,25 +477,107 @@ fn run_scan(args: RunArgs, mode: ScanMode) -> anyhow::Result<u8> {
         &files,
         args.show_suppressed,
         &mut result.stats.suppressed_findings,
+        &mut suppressed_rule_counts,
     )?
     .into_iter()
     .filter(|finding| filters.allows(finding))
     .collect();
-    let result = result.finalize();
+    let baseline_path = effective_baseline_path(args.baseline.as_ref(), config, ci_mode);
+    let baseline_owner = args
+        .baseline_owner
+        .as_deref()
+        .or(config.ci.baseline_owner.as_deref());
+    let baseline_comparison = baseline::compare_findings(
+        &result.root,
+        &result.findings,
+        baseline_path.clone(),
+        baseline_owner,
+        env!("CARGO_PKG_VERSION"),
+        &config_hash,
+        ci_mode
+            || fail_on_values
+                .iter()
+                .any(|fail_on| fail_on.is_new_findings_only()),
+    )?;
+    let report_new_finding_keys = baseline_comparison.new_keys.clone();
+    result.summary = collect_summary_metrics(
+        &files,
+        symbol_index.as_ref(),
+        &result.findings,
+        suppressed_rule_counts,
+        baseline_comparison.summary.clone(),
+    )?;
+    let score_options = ScoreOptions {
+        enabled: config.scoring.enabled && !args.no_score,
+        generated_paths,
+        baseline_new_keys: baseline_comparison.new_keys.clone(),
+    };
+    let result = result.finalize_with_score_options(&score_options);
 
-    let output = render_result(
+    if let Some(path) = args.write_baseline.as_ref() {
+        baseline::write_new_baseline(
+            path,
+            &result.root,
+            &result.findings,
+            baseline_owner,
+            env!("CARGO_PKG_VERSION"),
+            &config_hash,
+            args.force_baseline,
+        )?;
+        eprintln!("Wrote baseline to {}", path.display());
+    }
+
+    let output = render_result_with_context(
         &result,
         ReportOptions::new(format.into(), use_color(args.color)),
+        ReportContext {
+            tool_version: env!("CARGO_PKG_VERSION").to_string(),
+            config_hash: config_hash.clone(),
+            timing: ReportTiming {
+                scan_ms: elapsed_millis(scan_started.elapsed()),
+                report_ms: 0,
+                total_ms: 0,
+            },
+            new_finding_keys: report_new_finding_keys,
+            baseline_status_by_key: baseline_comparison
+                .status_by_key
+                .iter()
+                .map(|(key, status)| (key.clone(), status.as_str().to_string()))
+                .collect(),
+            fixed_findings: baseline_comparison
+                .fixed_entries
+                .iter()
+                .map(|entry| codehealth_reporters::BaselineFixedFinding {
+                    baseline_key: entry.baseline_key.clone(),
+                    fingerprint: entry.fingerprint.clone(),
+                    rule_id: entry.rule_id.clone(),
+                    path: entry.path.clone(),
+                    message: entry.message.clone(),
+                    first_seen: entry.first_seen,
+                    owner: entry.owner.clone(),
+                })
+                .collect(),
+        },
     )
     .context("failed to render report")?;
     write_or_print(args.output.as_deref(), &output)?;
 
-    if should_fail(
-        &result,
-        args.fail_on,
-        args.baseline.as_ref(),
-        &loaded_config,
-    )? {
+    if args.update_baseline {
+        let path = baseline_comparison
+            .path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(baseline::DEFAULT_BASELINE_PATH));
+        baseline::update_baseline(
+            &path,
+            &result.root,
+            &baseline_comparison,
+            env!("CARGO_PKG_VERSION"),
+            &config_hash,
+        )?;
+        eprintln!("Updated baseline at {}", path.display());
+    }
+
+    if should_fail(&result, &fail_on_values, &baseline_comparison.status_by_key) {
         Ok(1)
     } else {
         Ok(0)
@@ -517,6 +663,15 @@ fn run_duplicate_checks(
         }
     }
 
+    if config.duplication.detect_structural {
+        if let Some(symbol_index) = symbol_index {
+            findings.extend(find_structural_duplicates(
+                symbol_index,
+                structural_options(config),
+            ));
+        }
+    }
+
     if config.fastapi.enabled && config.fastapi.detect_duplicate_routes {
         if let Some(symbol_index) = symbol_index {
             findings.extend(find_duplicate_fastapi_route_findings(symbol_index));
@@ -538,6 +693,21 @@ fn exact_body_options(config: &CodehealthConfig) -> ExactBodyOptions {
     }
 }
 
+fn structural_options(config: &CodehealthConfig) -> StructuralOptions {
+    let overrides = config.rule_options_for(codehealth_duplication::STRUCTURAL_FUNCTION_RULE);
+    StructuralOptions {
+        min_lines: overrides
+            .and_then(|options| options.min_lines)
+            .unwrap_or(StructuralOptions::default().min_lines),
+        min_tokens: overrides
+            .and_then(|options| options.min_tokens)
+            .unwrap_or(StructuralOptions::default().min_tokens),
+        min_nodes: config.duplication.structural_min_nodes,
+        max_opaque_percent: config.duplication.structural_max_opaque_percent,
+        normalize_literals: config.duplication.structural_normalize_literals,
+    }
+}
+
 fn symbol_inputs_from_files(files: &[WorkspaceFile]) -> Vec<SymbolInput> {
     files
         .iter()
@@ -548,6 +718,271 @@ fn symbol_inputs_from_files(files: &[WorkspaceFile]) -> Vec<SymbolInput> {
         .collect()
 }
 
+fn generated_source_paths(files: &[WorkspaceFile]) -> BTreeSet<PathBuf> {
+    files
+        .iter()
+        .filter(|file| file.generated_reason.is_some())
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+fn collect_summary_metrics(
+    files: &[WorkspaceFile],
+    symbol_index: Option<&SymbolIndex>,
+    findings: &[Finding],
+    suppressed_rule_counts: BTreeMap<String, usize>,
+    baseline: BaselineSummary,
+) -> anyhow::Result<SummaryMetrics> {
+    let lines_scanned = count_scanned_lines(files)?;
+    let (duplicate_groups, duplicate_lines, most_duplicated_modules) = duplicate_summary(findings);
+    let most_suppressed_rules = suppressed_rule_counts
+        .into_iter()
+        .map(|(rule_id, count)| SuppressedRuleMetric { rule_id, count })
+        .collect::<Vec<_>>();
+
+    let mut summary = SummaryMetrics {
+        lines_scanned,
+        duplicate_groups,
+        duplicate_lines,
+        most_duplicated_modules,
+        most_suppressed_rules,
+        baseline,
+        ..SummaryMetrics::default()
+    };
+    sort_suppressed_rules(&mut summary.most_suppressed_rules);
+
+    if let Some(index) = symbol_index {
+        summary.largest_functions = largest_functions(index);
+        summary.largest_react_components = largest_react_components(index);
+        summary.most_complex_functions = most_complex_functions(index)?;
+    }
+
+    Ok(summary)
+}
+
+fn count_scanned_lines(files: &[WorkspaceFile]) -> anyhow::Result<usize> {
+    let mut total = 0;
+    for file in files {
+        let source = std::fs::read_to_string(&file.path)
+            .with_context(|| format!("failed to read {}", file.path.display()))?;
+        total += source.lines().count();
+    }
+    Ok(total)
+}
+
+fn duplicate_summary(findings: &[Finding]) -> (usize, usize, Vec<ModuleDuplicateMetric>) {
+    let mut groups = 0;
+    let mut total_duplicate_lines = 0;
+    let mut by_module: BTreeMap<PathBuf, (usize, usize)> = BTreeMap::new();
+
+    for finding in findings {
+        if finding.is_suppressed || !is_duplicate_finding(finding) {
+            continue;
+        }
+
+        groups += 1;
+        let line_count = metadata_usize(finding, "line_count").unwrap_or(0);
+        let duplicate_lines = line_count.saturating_mul(finding.locations.len().saturating_sub(1));
+        total_duplicate_lines += duplicate_lines;
+
+        for location in &finding.locations {
+            let entry = by_module.entry(location.path.clone()).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += line_count;
+        }
+    }
+
+    let mut modules = by_module
+        .into_iter()
+        .map(
+            |(path, (duplicate_findings, duplicate_lines))| ModuleDuplicateMetric {
+                path,
+                duplicate_findings,
+                duplicate_lines,
+            },
+        )
+        .collect::<Vec<_>>();
+    modules.sort_by(|left, right| {
+        right
+            .duplicate_lines
+            .cmp(&left.duplicate_lines)
+            .then_with(|| right.duplicate_findings.cmp(&left.duplicate_findings))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    modules.truncate(5);
+
+    (groups, total_duplicate_lines, modules)
+}
+
+fn is_duplicate_finding(finding: &Finding) -> bool {
+    matches!(
+        finding.kind,
+        FindingKind::DuplicateName
+            | FindingKind::ExactDuplicate
+            | FindingKind::StructuralDuplicate
+            | FindingKind::NearDuplicate
+            | FindingKind::SemanticCandidate
+    )
+}
+
+fn metadata_usize(finding: &Finding, key: &str) -> Option<usize> {
+    finding
+        .metadata
+        .get(key)?
+        .as_u64()
+        .and_then(|value| value.try_into().ok())
+}
+
+fn largest_functions(index: &SymbolIndex) -> Vec<DefinitionMetric> {
+    let mut metrics = index
+        .definitions
+        .iter()
+        .filter(|definition| is_function_metric_kind(definition.kind))
+        .map(definition_metric)
+        .collect::<Vec<_>>();
+    sort_definition_metrics(&mut metrics);
+    metrics.truncate(5);
+    metrics
+}
+
+fn largest_react_components(index: &SymbolIndex) -> Vec<DefinitionMetric> {
+    let mut metrics = index
+        .definitions
+        .iter()
+        .filter(|definition| definition.kind == DefinitionKind::ReactComponent)
+        .map(definition_metric)
+        .collect::<Vec<_>>();
+    sort_definition_metrics(&mut metrics);
+    metrics.truncate(5);
+    metrics
+}
+
+fn is_function_metric_kind(kind: DefinitionKind) -> bool {
+    matches!(
+        kind,
+        DefinitionKind::Function
+            | DefinitionKind::Method
+            | DefinitionKind::ReactHook
+            | DefinitionKind::FastApiRoute
+            | DefinitionKind::FastApiDependency
+    )
+}
+
+fn definition_metric(definition: &Definition) -> DefinitionMetric {
+    DefinitionMetric {
+        name: definition.qualified_name.clone(),
+        path: definition.file.clone(),
+        line: definition.span.start_position.line,
+        lines: definition_line_count(definition),
+        language: definition.language.label().to_string(),
+    }
+}
+
+fn sort_definition_metrics(metrics: &mut [DefinitionMetric]) {
+    metrics.sort_by(|left, right| {
+        right
+            .lines
+            .cmp(&left.lines)
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
+fn most_complex_functions(index: &SymbolIndex) -> anyhow::Result<Vec<ComplexityMetric>> {
+    let mut source_cache = BTreeMap::new();
+    let mut metrics = Vec::new();
+
+    for definition in &index.definitions {
+        if !is_function_metric_kind(definition.kind)
+            && definition.kind != DefinitionKind::ReactComponent
+        {
+            continue;
+        }
+
+        let source = cached_source(&definition.file, &mut source_cache)?;
+        let complexity = definition_complexity(definition, source);
+        metrics.push(ComplexityMetric {
+            name: definition.qualified_name.clone(),
+            path: definition.file.clone(),
+            line: definition.span.start_position.line,
+            score: complexity,
+            lines: definition_line_count(definition),
+            language: definition.language.label().to_string(),
+        });
+    }
+
+    metrics.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.lines.cmp(&left.lines))
+            .then_with(|| left.path.cmp(&right.path))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    metrics.truncate(5);
+    Ok(metrics)
+}
+
+fn cached_source<'a>(
+    path: &Path,
+    cache: &'a mut BTreeMap<PathBuf, String>,
+) -> anyhow::Result<&'a str> {
+    if !cache.contains_key(path) {
+        let source = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        cache.insert(path.to_path_buf(), source);
+    }
+
+    Ok(cache.get(path).expect("source was inserted").as_str())
+}
+
+fn definition_complexity(definition: &Definition, source: &str) -> usize {
+    let span = definition.body_span.unwrap_or(definition.span);
+    let snippet = if span.end <= source.len()
+        && source.is_char_boundary(span.start)
+        && source.is_char_boundary(span.end)
+    {
+        &source[span.start..span.end]
+    } else {
+        ""
+    };
+
+    lexical_complexity(snippet)
+}
+
+fn lexical_complexity(source: &str) -> usize {
+    let lowered = source.to_ascii_lowercase();
+    let mut score = 1;
+    for token in
+        lowered.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+    {
+        if matches!(
+            token,
+            "if" | "elif" | "else" | "for" | "while" | "match" | "case" | "catch" | "except"
+        ) {
+            score += 1;
+        }
+    }
+    score + lowered.matches("&&").count() + lowered.matches("||").count()
+}
+
+fn definition_line_count(definition: &Definition) -> usize {
+    let span = definition.body_span.unwrap_or(definition.span);
+    span.end_position
+        .line
+        .saturating_sub(span.start_position.line)
+        + 1
+}
+
+fn sort_suppressed_rules(rules: &mut [SuppressedRuleMetric]) {
+    rules.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.rule_id.cmp(&right.rule_id))
+    });
+}
+
 fn apply_config_policy(
     findings: Vec<Finding>,
     root: &Path,
@@ -555,6 +990,7 @@ fn apply_config_policy(
     files: &[WorkspaceFile],
     show_suppressed: bool,
     suppressed_count: &mut usize,
+    suppressed_rule_counts: &mut BTreeMap<String, usize>,
 ) -> anyhow::Result<Vec<Finding>> {
     let suppressions = collect_suppressions(files)?;
     let mut output = Vec::new();
@@ -596,6 +1032,9 @@ fn apply_config_policy(
                 warnings: suppression.warnings.clone(),
             });
             *suppressed_count += 1;
+            *suppressed_rule_counts
+                .entry(finding.rule_id.clone())
+                .or_insert(0) += 1;
         }
 
         if !finding.is_suppressed || show_suppressed {
@@ -689,28 +1128,9 @@ fn write_or_print(output_path: Option<&Path>, output: &str) -> anyhow::Result<()
 
 fn should_fail(
     result: &ScanResult,
-    fail_on: Option<FailOn>,
-    baseline_path: Option<&PathBuf>,
-    loaded_config: &LoadedConfig,
-) -> anyhow::Result<bool> {
-    let fail_on_values = if let Some(fail_on) = fail_on {
-        vec![fail_on]
-    } else if loaded_config.path.is_some() {
-        loaded_config
-            .config
-            .ci
-            .fail_on
-            .iter()
-            .filter_map(|value| config_fail_on(value))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    if fail_on_values.is_empty() {
-        return Ok(false);
-    }
-
+    fail_on_values: &[FailOn],
+    baseline_status_by_key: &BTreeMap<String, baseline::FindingBaselineStatus>,
+) -> bool {
     for fail_on in fail_on_values {
         let should_fail = match fail_on {
             FailOn::High => result
@@ -718,26 +1138,20 @@ fn should_fail(
                 .iter()
                 .filter(|finding| !finding.is_suppressed)
                 .any(|finding| finding.severity >= Severity::High),
-            FailOn::NewHigh => has_new_finding_at_or_above(
-                result,
-                Severity::High,
-                baseline_path,
-                &loaded_config.config,
-            )?,
-            FailOn::NewMedium => has_new_finding_at_or_above(
-                result,
-                Severity::Medium,
-                baseline_path,
-                &loaded_config.config,
-            )?,
+            FailOn::NewHigh => {
+                has_new_finding_at_or_above(result, Severity::High, baseline_status_by_key)
+            }
+            FailOn::NewMedium => {
+                has_new_finding_at_or_above(result, Severity::Medium, baseline_status_by_key)
+            }
         };
 
         if should_fail {
-            return Ok(true);
+            return true;
         }
     }
 
-    Ok(false)
+    false
 }
 
 fn config_fail_on(value: &str) -> Option<FailOn> {
@@ -749,44 +1163,65 @@ fn config_fail_on(value: &str) -> Option<FailOn> {
     }
 }
 
+fn effective_fail_on_values(
+    fail_on: Option<FailOn>,
+    loaded_config: &LoadedConfig,
+    ci_mode: bool,
+) -> Vec<FailOn> {
+    if let Some(fail_on) = fail_on {
+        return vec![fail_on];
+    }
+
+    let configured = loaded_config
+        .config
+        .ci
+        .fail_on
+        .iter()
+        .filter_map(|value| config_fail_on(value))
+        .collect::<Vec<_>>();
+    if !configured.is_empty() {
+        return configured;
+    }
+
+    if ci_mode {
+        vec![FailOn::NewHigh]
+    } else {
+        Vec::new()
+    }
+}
+
+fn effective_baseline_path(
+    baseline_path: Option<&PathBuf>,
+    config: &CodehealthConfig,
+    ci_mode: bool,
+) -> Option<PathBuf> {
+    baseline_path
+        .cloned()
+        .or_else(|| config.ci.baseline.clone())
+        .or_else(|| ci_mode.then(|| PathBuf::from(baseline::DEFAULT_BASELINE_PATH)))
+}
+
 fn has_new_finding_at_or_above(
     result: &ScanResult,
     severity: Severity,
-    baseline_path: Option<&PathBuf>,
-    config: &CodehealthConfig,
-) -> anyhow::Result<bool> {
-    let baseline_path = baseline_path
-        .cloned()
-        .or_else(|| config.ci.baseline.clone())
-        .unwrap_or_else(|| PathBuf::from(".codehealth/baseline.json"));
-    let baseline = load_baseline_keys(&baseline_path)?;
-
-    Ok(result
+    baseline_status_by_key: &BTreeMap<String, baseline::FindingBaselineStatus>,
+) -> bool {
+    result
         .findings
         .iter()
         .filter(|finding| !finding.is_suppressed)
-        .any(|finding| finding.severity >= severity && !baseline.contains(&finding.baseline_key)))
+        .any(|finding| {
+            finding.severity >= severity
+                && baseline_status_by_key
+                    .get(&finding.baseline_key)
+                    .is_some_and(|status| *status == baseline::FindingBaselineStatus::New)
+        })
 }
 
-fn load_baseline_keys(path: &Path) -> anyhow::Result<BTreeSet<String>> {
-    if !path.exists() {
-        eprintln!(
-            "warning: baseline {} does not exist; treating it as empty",
-            path.display()
-        );
-        return Ok(BTreeSet::new());
+impl FailOn {
+    fn is_new_findings_only(self) -> bool {
+        matches!(self, Self::NewHigh | Self::NewMedium)
     }
-
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read baseline {}", path.display()))?;
-    let result: ScanResult = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse baseline {}", path.display()))?;
-
-    Ok(result
-        .findings
-        .into_iter()
-        .map(|finding| finding.baseline_key)
-        .collect())
 }
 
 fn run_rules(args: RulesArgs) -> anyhow::Result<u8> {
@@ -810,7 +1245,7 @@ fn run_rules(args: RulesArgs) -> anyhow::Result<u8> {
                 .collect::<Vec<_>>();
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
-        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Html => {
+        OutputFormat::Text | OutputFormat::Sarif | OutputFormat::Html | OutputFormat::Markdown => {
             let color = use_color(args.color);
             println!("Codehealth Rules\n");
             for rule in rules {
@@ -976,6 +1411,9 @@ fn run_debug(command: DebugCommand) -> anyhow::Result<u8> {
                 }
             }
         }
+        DebugCommand::Canonical(args) => {
+            run_debug_canonical(args)?;
+        }
         DebugCommand::Symbols(args) => {
             let parser_registry = build_language_registry();
             let symbol_registry = build_symbol_registry();
@@ -1078,6 +1516,111 @@ fn run_debug(command: DebugCommand) -> anyhow::Result<u8> {
     Ok(0)
 }
 
+fn run_debug_canonical(args: DebugCanonicalArgs) -> anyhow::Result<()> {
+    let parser_registry = build_language_registry();
+    let symbol_registry = build_symbol_registry();
+    let tree = parse_debug_file_with_registry(&args.file, &parser_registry)?;
+    let language = SymbolLanguage::from_info(tree.source.language)
+        .with_context(|| format!("unsupported source file {}", args.file.display()))?;
+    let extractor = symbol_registry
+        .extractor_for_language(language)
+        .with_context(|| format!("no symbol extractor for {}", tree.source.language.name))?;
+    let symbols = extractor.extract(&tree);
+    let definitions = symbols
+        .definitions
+        .into_iter()
+        .filter(|definition| {
+            if let Some(symbol) = args.symbol.as_ref() {
+                definition.name == *symbol || definition.qualified_name == *symbol
+            } else {
+                true
+            }
+        })
+        .filter(|definition| definition.structural_fingerprint.is_some())
+        .collect::<Vec<_>>();
+
+    if definitions.is_empty() {
+        bail!(
+            "no canonical fingerprints found for {}{}",
+            args.file.display(),
+            args.symbol
+                .as_ref()
+                .map(|symbol| format!(" matching '{symbol}'"))
+                .unwrap_or_default()
+        );
+    }
+
+    match args.format {
+        DebugDumpFormat::Text => {
+            println!("File: {}", args.file.display());
+            println!("Language: {}", tree.source.language.name);
+            println!("Canonical symbols: {}", definitions.len());
+            for definition in &definitions {
+                let fingerprint = definition
+                    .structural_fingerprint
+                    .as_ref()
+                    .expect("filtered above");
+                println!(
+                    "  {}  {}",
+                    definition.kind.label(),
+                    definition.qualified_name
+                );
+                println!("    Canonical hash: {}", fingerprint.stable_hash_hex);
+                println!("    Version: {}", fingerprint.version);
+                println!("    Literal policy: {:?}", fingerprint.literal_policy);
+                println!(
+                    "    Nodes: {} (opaque: {})",
+                    fingerprint.node_count, fingerprint.opaque_node_count
+                );
+                println!("    Tokens: {}", fingerprint.token_estimate);
+                println!("    Return shape: {}", fingerprint.return_shape);
+                if !fingerprint.call_names.is_empty() {
+                    println!("    Calls: {}", fingerprint.call_names.join(", "));
+                }
+                if !fingerprint.slot_bindings.is_empty() {
+                    println!("    Slot bindings:");
+                    for binding in &fingerprint.slot_bindings {
+                        println!(
+                            "      {} -> {} ({})",
+                            binding.original, binding.slot, binding.role
+                        );
+                    }
+                }
+                if !fingerprint.warnings.is_empty() {
+                    println!("    Warnings:");
+                    for warning in &fingerprint.warnings {
+                        println!("      {warning}");
+                    }
+                }
+                println!("    Serialization:");
+                println!("      {}", fingerprint.serialization);
+            }
+        }
+        DebugDumpFormat::Json => {
+            let json = definitions
+                .iter()
+                .filter_map(|definition| {
+                    definition
+                        .structural_fingerprint
+                        .as_ref()
+                        .map(|fingerprint| {
+                            serde_json::json!({
+                                "kind": definition.kind.label(),
+                                "name": &definition.name,
+                                "qualified_name": &definition.qualified_name,
+                                "language": definition.language.label(),
+                                "fingerprint": fingerprint,
+                            })
+                        })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+    }
+
+    Ok(())
+}
+
 fn print_workspace_debug(scan: &WorkspaceScan) {
     println!("Root: {}", scan.root.display());
     println!("Files scanned: {}", scan.files.len());
@@ -1163,6 +1706,16 @@ fn use_color(choice: ColorChoice) -> bool {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
     }
+}
+
+fn config_hash(config: &CodehealthConfig) -> anyhow::Result<String> {
+    let raw = serde_json::to_vec(config)?;
+    let digest = Sha256::digest(raw);
+    Ok(format!("{digest:x}"))
+}
+
+fn elapsed_millis(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn parse_jobs(value: &str) -> Result<usize, String> {
