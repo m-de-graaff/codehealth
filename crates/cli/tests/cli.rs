@@ -596,6 +596,247 @@ fn style_json_report_includes_fix_metadata() {
 }
 
 #[test]
+fn react_health_rules_report_component_risks() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("package.json"),
+        r#"{"dependencies":{"react":"latest"}}"#,
+    )
+    .expect("write package json");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [rule_options."react.large_component"]
+            max_lines = 8
+
+            [rule_options."react.too_many_props"]
+            max_params = 2
+
+            [rule_options."react.deeply_nested_jsx"]
+            max_depth = 2
+
+            [rule_options."react.prop_drilling_candidate"]
+            max_depth = 2
+
+            [rule_options."react.large_context_provider"]
+            max_context_values = 2
+
+            [rule_options."react.component_too_many_responsibilities"]
+            max_responsibilities = 3
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("Dashboard.tsx"),
+        r#"
+import React, { useEffect, useState } from "react";
+
+const Context = React.createContext(null);
+type Props = { enabled: boolean; items: Array<{ id: string; name: string }>; user: string; token: string; org: string };
+
+export function Dashboard(props: Props) {
+  const [value, setValue] = useState(0);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    setReady(props.enabled);
+    setValue(props.items.length);
+  }, [props.enabled, props.items]);
+  function InlineWidget() {
+    return <span>{value}</span>;
+  }
+  const load = () => fetch("/api");
+  const rows = props.items.map((item, index) => <li key={index}><span>{item.name}</span></li>);
+  return (
+    <Context.Provider value={{value, ready, setValue, setReady}}>
+      <section onClick={() => setReady(true)} onMouseEnter={() => load()} onKeyDown={() => setValue(2)} onFocus={() => setReady(false)}>
+        <div>
+          <main>
+            <article>
+              <InlineWidget user={props.user} token={props.token} org={props.org} />
+              <Child user={props.user} token={props.token} org={props.org} />
+              <Other user={props.user} token={props.token} org={props.org} />
+              {props.items.map((item) => <div>{item.name}</div>)}
+              {rows}
+            </article>
+          </main>
+        </div>
+      </section>
+    </Context.Provider>
+  );
+}
+"#,
+    )
+    .expect("write tsx");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rules = finding_rule_ids(&output);
+
+    for expected in [
+        "react.large_component",
+        "react.too_many_props",
+        "react.deeply_nested_jsx",
+        "react.unnecessary_effect_candidate",
+        "react.derived_state_candidate",
+        "react.inline_component_inside_render",
+        "react.unstable_list_key",
+        "react.missing_key",
+        "react.prop_drilling_candidate",
+        "react.large_context_provider",
+        "react.mixed_data_fetching_and_rendering",
+        "react.component_too_many_responsibilities",
+    ] {
+        assert!(rules.contains(&expected.to_string()), "missing {expected}");
+    }
+}
+
+#[test]
+fn react_duplicate_component_shape_includes_related_locations() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("package.json"),
+        r#"{"dependencies":{"react":"latest"}}"#,
+    )
+    .expect("write package json");
+    std::fs::write(
+        temp.path().join("Cards.tsx"),
+        r#"
+export function UserCard({ user }) {
+  return <section className="card"><h2>{user.name}</h2><p>{user.email}</p></section>;
+}
+
+export function AccountCard({ account }) {
+  return <section className="card"><h2>{account.name}</h2><p>{account.email}</p></section>;
+}
+"#,
+    )
+    .expect("write tsx");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
+    let finding = json["findings"]
+        .as_array()
+        .expect("findings")
+        .iter()
+        .find(|finding| finding["ruleId"] == "react.duplicate_component_shape")
+        .expect("duplicate component shape finding");
+
+    assert_eq!(finding["locations"].as_array().expect("locations").len(), 2);
+    assert!(finding["metadata"]["canonical_hash"].as_str().is_some());
+}
+
+#[test]
+fn react_safe_autofix_removes_redundant_fragment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("package.json"),
+        r#"{"dependencies":{"react":"latest"}}"#,
+    )
+    .expect("write package json");
+    let file = temp.path().join("Card.tsx");
+    std::fs::write(
+        &file,
+        r#"
+export function Card() {
+  return <><div className="card" /></>;
+}
+"#,
+    )
+    .expect("write tsx");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--fix-safe")
+        .assert()
+        .success()
+        .stderr(contains("Applied 1 safe edits"));
+
+    let after = std::fs::read_to_string(file).expect("read tsx");
+    assert!(after.contains(r#"return <div className="card" />;"#));
+    assert!(!after.contains("<>"));
+}
+
+#[test]
+fn react_rules_can_be_disabled() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("package.json"),
+        r#"{"dependencies":{"react":"latest"}}"#,
+    )
+    .expect("write package json");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [react]
+            enabled = false
+
+            [rule_options."react.large_component"]
+            max_lines = 1
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("App.tsx"),
+        r#"
+export function App() {
+  return (
+    <main>
+      <section>
+        <div>
+          <span>Disabled</span>
+        </div>
+      </section>
+    </main>
+  );
+}
+"#,
+    )
+    .expect("write tsx");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let rules = finding_rule_ids(&output);
+
+    assert!(!rules.iter().any(|rule| rule.starts_with("react.")));
+}
+
+#[test]
 fn typescript_style_suggestion_rules_are_reported() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
@@ -1312,6 +1553,9 @@ fn ignore_paths_remove_files_from_scan() {
         r#"
             [ignore]
             paths = ["duplicates"]
+
+            [react]
+            enabled = false
 
             [rules]
             "duplicate.name.function" = "off"

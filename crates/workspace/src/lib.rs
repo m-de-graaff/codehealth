@@ -227,6 +227,8 @@ pub struct ReactMetadata {
     pub via_tsx_or_jsx: bool,
     pub via_next_dependency: bool,
     pub via_vite_dependency: bool,
+    pub via_remix_dependency: bool,
+    pub source_directories: BTreeSet<PathBuf>,
 }
 
 impl ReactMetadata {
@@ -235,6 +237,7 @@ impl ReactMetadata {
             || self.via_tsx_or_jsx
             || self.via_next_dependency
             || self.via_vite_dependency
+            || self.via_remix_dependency
     }
 }
 
@@ -310,6 +313,7 @@ pub fn scan_workspace(
     for entry in builder.build() {
         let entry = entry.map_err(WorkspaceError::Walk)?;
         let path = entry.path().to_path_buf();
+        observe_common_react_source_directory(&mut scan.metadata, &root, &path);
 
         if entry
             .file_type()
@@ -734,6 +738,42 @@ fn observe_package_json(metadata: &mut WorkspaceMetadata, text: Option<&str>) {
         if dependencies.contains_key("vite") {
             metadata.react.via_vite_dependency = true;
         }
+        if dependencies.contains_key("@remix-run/react")
+            || dependencies.contains_key("@remix-run/node")
+        {
+            metadata.react.via_remix_dependency = true;
+        }
+    }
+}
+
+fn observe_common_react_source_directory(
+    metadata: &mut WorkspaceMetadata,
+    root: &Path,
+    path: &Path,
+) {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let parts = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+
+    for candidate in [
+        ["src", "components"].as_slice(),
+        ["src", "pages"].as_slice(),
+        ["src", "app"].as_slice(),
+        ["components"].as_slice(),
+        ["pages"].as_slice(),
+        ["app"].as_slice(),
+    ] {
+        if parts.len() >= candidate.len()
+            && parts
+                .iter()
+                .zip(candidate.iter())
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        {
+            let directory = candidate.iter().collect::<PathBuf>();
+            metadata.react.source_directories.insert(directory);
+        }
     }
 }
 
@@ -984,6 +1024,10 @@ mod tests {
             "export function App() { return <div />; }\n",
         );
         write(
+            temp.path().join("src/components/Button.tsx"),
+            "export function Button() { return <button />; }\n",
+        );
+        write(
             temp.path().join("src/app.py"),
             "from fastapi import FastAPI\napp = FastAPI()\n",
         );
@@ -1010,7 +1054,7 @@ mod tests {
         write(temp.path().join("src/blob.ts"), "\0\0\0");
         write(
             temp.path().join("package.json"),
-            r#"{"packageManager":"pnpm@9.0.0","dependencies":{"react":"latest","next":"latest"},"devDependencies":{"vite":"latest"}}"#,
+            r#"{"packageManager":"pnpm@9.0.0","dependencies":{"react":"latest","next":"latest","@remix-run/react":"latest"},"devDependencies":{"vite":"latest"}}"#,
         );
         write(
             temp.path().join("pnpm-lock.yaml"),
@@ -1068,6 +1112,7 @@ mod tests {
                 "src/app.py",
                 "src/b.mts",
                 "src/component.tsx",
+                "src/components/Button.tsx",
                 "src/lib.rs",
             ]
         );
@@ -1087,6 +1132,16 @@ mod tests {
             .any(|skipped| matches!(skipped.reason, SkipReason::Minified(_))));
         assert!(scan.metadata.package_managers.contains("pnpm"));
         assert!(scan.metadata.react.detected());
+        assert!(scan.metadata.react.via_dependency);
+        assert!(scan.metadata.react.via_tsx_or_jsx);
+        assert!(scan.metadata.react.via_next_dependency);
+        assert!(scan.metadata.react.via_vite_dependency);
+        assert!(scan.metadata.react.via_remix_dependency);
+        assert!(scan
+            .metadata
+            .react
+            .source_directories
+            .contains(&PathBuf::from("src/components")));
         assert!(scan.metadata.fastapi.detected());
         assert_eq!(scan.metadata.rust.workspace_members, vec!["crates/*"]);
     }

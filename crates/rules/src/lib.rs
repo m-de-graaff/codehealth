@@ -3,7 +3,7 @@ use codehealth_parser::{SourceFile, SyntaxTree};
 use codehealth_symbols::SymbolIndex;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 mod style;
@@ -28,6 +28,22 @@ pub const PYTHON_DUPLICATED_ROUTE_HANDLER_BUSINESS_LOGIC: &str =
 pub const RUST_DUPLICATE_MATCH_ARM_BODY: &str = "rust.duplicate_match_arm_body";
 pub const RUST_REPEATED_UNWRAP_POLICY: &str = "rust.repeated_unwrap_policy";
 pub const RUST_MANUAL_RESULT_OPTION_PATTERN: &str = "rust.manual_result_option_pattern";
+pub const REACT_LARGE_COMPONENT: &str = "react.large_component";
+pub const REACT_TOO_MANY_PROPS: &str = "react.too_many_props";
+pub const REACT_DEEPLY_NESTED_JSX: &str = "react.deeply_nested_jsx";
+pub const REACT_DUPLICATE_COMPONENT_SHAPE: &str = "react.duplicate_component_shape";
+pub const REACT_REPEATED_HOOK_LOGIC: &str = "react.repeated_hook_logic";
+pub const REACT_UNNECESSARY_EFFECT_CANDIDATE: &str = "react.unnecessary_effect_candidate";
+pub const REACT_DERIVED_STATE_CANDIDATE: &str = "react.derived_state_candidate";
+pub const REACT_INLINE_COMPONENT_INSIDE_RENDER: &str = "react.inline_component_inside_render";
+pub const REACT_UNSTABLE_LIST_KEY: &str = "react.unstable_list_key";
+pub const REACT_MISSING_KEY: &str = "react.missing_key";
+pub const REACT_PROP_DRILLING_CANDIDATE: &str = "react.prop_drilling_candidate";
+pub const REACT_LARGE_CONTEXT_PROVIDER: &str = "react.large_context_provider";
+pub const REACT_MIXED_DATA_FETCHING_AND_RENDERING: &str = "react.mixed_data_fetching_and_rendering";
+pub const REACT_COMPONENT_TOO_MANY_RESPONSIBILITIES: &str =
+    "react.component_too_many_responsibilities";
+pub const REACT_REDUNDANT_FRAGMENT: &str = "react.redundant_fragment";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleMetadata {
@@ -64,6 +80,10 @@ pub struct RuleExecutionConfig {
     pub simplify_boolean_returns: bool,
     pub prefer_expression_arrows: bool,
     pub prefer_guard_clauses: bool,
+    pub react_enabled: bool,
+    pub react_max_component_lines: usize,
+    pub react_max_props: usize,
+    pub react_prop_drilling_depth: usize,
     pub disabled_rules: BTreeSet<String>,
     pub options: BTreeMap<String, RuleOptionSettings>,
 }
@@ -87,6 +107,26 @@ pub struct RuleOptionSettings {
     pub max_condition_terms: Option<usize>,
     pub max_literal_occurrences: Option<usize>,
     pub max_unwraps: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub min_nodes: Option<usize>,
+    pub max_context_values: Option<usize>,
+    pub max_responsibilities: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleWorkspaceMetadata {
+    pub react: RuleReactWorkspaceMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuleReactWorkspaceMetadata {
+    pub detected: bool,
+    pub via_dependency: bool,
+    pub via_tsx_or_jsx: bool,
+    pub via_next_dependency: bool,
+    pub via_vite_dependency: bool,
+    pub via_remix_dependency: bool,
+    pub source_directories: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -97,6 +137,7 @@ pub struct RuleContext<'a> {
     pub symbols: Option<&'a SymbolIndex>,
     pub config: &'a RuleExecutionConfig,
     pub workspace_frameworks: &'a [&'a str],
+    pub workspace: &'a RuleWorkspaceMetadata,
 }
 
 #[derive(Default)]
@@ -375,20 +416,111 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             AutofixSafety::SuggestionOnly,
         )
         .with_language("rust"),
-        planned(
-            "react.large.component",
-            &["react.large_component"],
+        react_rule(
+            REACT_LARGE_COMPONENT,
+            &["react.large.component"],
             "Large React component",
-            FindingKind::React,
-        )
-        .with_framework("react"),
-        planned(
-            "react.unstable.list_key",
-            &["react.unstable_list_key"],
+            "Finds React components whose body length exceeds the configured threshold.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_TOO_MANY_PROPS,
+            &[],
+            "Too many React props",
+            "Finds React components with more props than the configured threshold.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_DEEPLY_NESTED_JSX,
+            &[],
+            "Deeply nested JSX",
+            "Finds components whose JSX tree is nested beyond the configured depth.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_DUPLICATE_COMPONENT_SHAPE,
+            &[],
+            "Duplicate React component shape",
+            "Finds React components with structurally similar JSX trees.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_REPEATED_HOOK_LOGIC,
+            &[],
+            "Repeated React hook logic",
+            "Finds components or hooks with repeated hook call sequences.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_UNNECESSARY_EFFECT_CANDIDATE,
+            &[],
+            "Unnecessary React effect candidate",
+            "Finds effects that appear to derive local state from existing values.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_DERIVED_STATE_CANDIDATE,
+            &[],
+            "Derived React state candidate",
+            "Finds state/effect pairs that may be replaceable with derived values.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_INLINE_COMPONENT_INSIDE_RENDER,
+            &[],
+            "Inline component inside render",
+            "Finds component declarations nested inside another component render path.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_UNSTABLE_LIST_KEY,
+            &["react.unstable.list_key"],
             "Unstable React list key",
-            FindingKind::React,
-        )
-        .with_framework("react"),
+            "Finds array-index list keys that can cause unstable reconciliation.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_MISSING_KEY,
+            &[],
+            "Missing React list key",
+            "Finds JSX returned from array maps without an apparent key prop.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_PROP_DRILLING_CANDIDATE,
+            &[],
+            "React prop drilling candidate",
+            "Finds props forwarded through repeated child components.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_LARGE_CONTEXT_PROVIDER,
+            &[],
+            "Large React context provider",
+            "Finds context providers whose values appear to carry too many responsibilities.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_MIXED_DATA_FETCHING_AND_RENDERING,
+            &[],
+            "Mixed React data fetching and rendering",
+            "Finds components that combine data fetching calls with substantial JSX rendering.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_COMPONENT_TOO_MANY_RESPONSIBILITIES,
+            &[],
+            "React component with too many responsibilities",
+            "Finds components combining many state, effect, event, data, context, and rendering responsibilities.",
+            AutofixSafety::SuggestionOnly,
+        ),
+        react_rule(
+            REACT_REDUNDANT_FRAGMENT,
+            &[],
+            "Redundant React fragment",
+            "Finds fragments that wrap exactly one JSX child and can be removed safely.",
+            AutofixSafety::Safe,
+        ),
         RuleMetadata {
             code: "fastapi.duplicate.route",
             aliases: &["fastapi.duplicate_route"],
@@ -522,6 +654,37 @@ fn style_rule(
         autofix_explanation: match autofix {
             AutofixSafety::Safe => "Safe autofix is available for mechanically local rewrites covered by parser validation.",
             AutofixSafety::SuggestionOnly => "Suggestion only. The transformation may require human judgment or broader refactoring.",
+            AutofixSafety::Unavailable => "No automated fix is available.",
+        },
+    }
+}
+
+fn react_rule(
+    code: &'static str,
+    aliases: &'static [&'static str],
+    name: &'static str,
+    description: &'static str,
+    autofix: AutofixSafety,
+) -> RuleMetadata {
+    RuleMetadata {
+        code,
+        aliases,
+        name,
+        description,
+        category: "react",
+        kind: FindingKind::React,
+        default_severity: Severity::Medium,
+        default_confidence: Confidence::Medium,
+        implemented: true,
+        language: None,
+        framework: Some("react"),
+        explanation: description,
+        remediation: "Refactor the component toward smaller render units, clearer hook boundaries, stable list rendering, or shared JSX abstractions as appropriate.",
+        detection_reason: "The React analyzer inspected component symbols, JSX structure, hook usage, and component graph signals.",
+        autofix,
+        autofix_explanation: match autofix {
+            AutofixSafety::Safe => "Safe autofix is available for narrowly local JSX syntax rewrites that preserve rendered output.",
+            AutofixSafety::SuggestionOnly => "Suggestion only. React refactors can change component boundaries, state lifetimes, or rendering behavior.",
             AutofixSafety::Unavailable => "No automated fix is available.",
         },
     }

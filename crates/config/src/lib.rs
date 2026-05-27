@@ -110,7 +110,21 @@ paths = [
 "rust.duplicate_match_arm_body" = "info"
 "rust.repeated_unwrap_policy" = "warn"
 "rust.manual_result_option_pattern" = "info"
-"react.large.component" = "warn"
+"react.large_component" = "warn"
+"react.too_many_props" = "warn"
+"react.deeply_nested_jsx" = "warn"
+"react.duplicate_component_shape" = "warn"
+"react.repeated_hook_logic" = "warn"
+"react.unnecessary_effect_candidate" = "info"
+"react.derived_state_candidate" = "info"
+"react.inline_component_inside_render" = "warn"
+"react.unstable_list_key" = "warn"
+"react.missing_key" = "warn"
+"react.prop_drilling_candidate" = "warn"
+"react.large_context_provider" = "warn"
+"react.mixed_data_fetching_and_rendering" = "warn"
+"react.component_too_many_responsibilities" = "warn"
+"react.redundant_fragment" = "info"
 "fastapi.duplicate.route" = "error"
 
 [rule_options."duplicate.exact.file"]
@@ -151,6 +165,41 @@ exclude_paths = []
 
 [rule_options."rust.repeated_unwrap_policy"]
 max_unwraps = 2
+include_paths = []
+exclude_paths = []
+
+[rule_options."react.large_component"]
+max_lines = 180
+include_paths = []
+exclude_paths = []
+
+[rule_options."react.too_many_props"]
+max_params = 8
+include_paths = []
+exclude_paths = []
+
+[rule_options."react.deeply_nested_jsx"]
+max_depth = 5
+include_paths = []
+exclude_paths = []
+
+[rule_options."react.duplicate_component_shape"]
+min_nodes = 3
+include_paths = []
+exclude_paths = []
+
+[rule_options."react.prop_drilling_candidate"]
+max_depth = 3
+include_paths = []
+exclude_paths = []
+
+[rule_options."react.large_context_provider"]
+max_context_values = 6
+include_paths = []
+exclude_paths = []
+
+[rule_options."react.component_too_many_responsibilities"]
+max_responsibilities = 5
 include_paths = []
 exclude_paths = []
 
@@ -529,6 +578,10 @@ pub struct RuleOptions {
     pub max_condition_terms: Option<usize>,
     pub max_literal_occurrences: Option<usize>,
     pub max_unwraps: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub min_nodes: Option<usize>,
+    pub max_context_values: Option<usize>,
+    pub max_responsibilities: Option<usize>,
     pub include_paths: Vec<String>,
     pub exclude_paths: Vec<String>,
 }

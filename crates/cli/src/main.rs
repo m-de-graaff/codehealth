@@ -21,14 +21,18 @@ use codehealth_reporters::{
 };
 use codehealth_rules::{
     canonical_rule_id, find_rule, rule_catalog, RuleContext, RuleExecutionConfig,
-    RuleOptionSettings, RuleRegistry as StyleRuleRegistry,
+    RuleOptionSettings, RuleReactWorkspaceMetadata, RuleRegistry as StyleRuleRegistry,
+    RuleWorkspaceMetadata,
 };
+use codehealth_rules_react::react_rules;
 use codehealth_symbols::{
     build_symbol_index, find_duplicate_fastapi_route_findings, find_duplicate_name_findings,
     Definition, DefinitionKind, Language as SymbolLanguage, SymbolIndex, SymbolInput,
     SymbolRegistry,
 };
-use codehealth_workspace::{scan_workspace, WorkspaceFile, WorkspaceScan, WorkspaceScanOptions};
+use codehealth_workspace::{
+    scan_workspace, WorkspaceFile, WorkspaceMetadata, WorkspaceScan, WorkspaceScanOptions,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -433,6 +437,7 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
     result.stats.files_skipped = workspace_scan.skipped.len();
     result.stats.config_files = workspace_scan.config_files.len();
     let workspace_frameworks = workspace_scan.metadata.frameworks();
+    let rule_workspace = rule_workspace_metadata(&workspace_scan.metadata);
     let files = workspace_scan.files;
     result.stats.files_scanned = files.len();
     let generated_paths = generated_source_paths(&files);
@@ -474,6 +479,7 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
             &registry,
             &result.root,
             &workspace_frameworks,
+            &rule_workspace,
         )?);
     }
 
@@ -714,8 +720,12 @@ fn run_style_checks(
     parser_registry: &LanguageRegistry,
     root: &Path,
     workspace_frameworks: &[&str],
+    workspace: &RuleWorkspaceMetadata,
 ) -> anyhow::Result<Vec<Finding>> {
-    let registry = StyleRuleRegistry::with_builtin_rules();
+    let mut registry = StyleRuleRegistry::with_builtin_rules();
+    for rule in react_rules() {
+        registry.register_box(rule);
+    }
     let mut findings = Vec::new();
 
     for file in files {
@@ -742,11 +752,26 @@ fn run_style_checks(
             symbols: symbol_index,
             config: &rule_config,
             workspace_frameworks,
+            workspace,
         };
         findings.extend(registry.run(&context));
     }
 
     Ok(findings)
+}
+
+fn rule_workspace_metadata(metadata: &WorkspaceMetadata) -> RuleWorkspaceMetadata {
+    RuleWorkspaceMetadata {
+        react: RuleReactWorkspaceMetadata {
+            detected: metadata.react.detected(),
+            via_dependency: metadata.react.via_dependency,
+            via_tsx_or_jsx: metadata.react.via_tsx_or_jsx,
+            via_next_dependency: metadata.react.via_next_dependency,
+            via_vite_dependency: metadata.react.via_vite_dependency,
+            via_remix_dependency: metadata.react.via_remix_dependency,
+            source_directories: metadata.react.source_directories.clone(),
+        },
+    }
 }
 
 fn rule_execution_config_for_file(
@@ -757,7 +782,10 @@ fn rule_execution_config_for_file(
     let paths = vec![path.to_path_buf()];
     let disabled_rules = rule_catalog()
         .into_iter()
-        .filter(|rule| config.level_for_rule(rule.code, root, &paths).is_off())
+        .filter(|rule| {
+            config.level_for_rule(rule.code, root, &paths).is_off()
+                || (!config.react.enabled && rule.framework == Some("react"))
+        })
         .map(|rule| rule.code.to_string())
         .collect();
     let options = config
@@ -770,6 +798,10 @@ fn rule_execution_config_for_file(
         simplify_boolean_returns: config.style.simplify_boolean_returns,
         prefer_expression_arrows: config.style.prefer_expression_arrows,
         prefer_guard_clauses: config.style.prefer_guard_clauses,
+        react_enabled: config.react.enabled,
+        react_max_component_lines: config.react.max_component_lines,
+        react_max_props: config.react.max_props,
+        react_prop_drilling_depth: config.react.prop_drilling_depth,
         disabled_rules,
         options,
     }
@@ -785,6 +817,10 @@ fn rule_option_settings(options: &codehealth_config::RuleOptions) -> RuleOptionS
         max_condition_terms: options.max_condition_terms,
         max_literal_occurrences: options.max_literal_occurrences,
         max_unwraps: options.max_unwraps,
+        max_depth: options.max_depth,
+        min_nodes: options.min_nodes,
+        max_context_values: options.max_context_values,
+        max_responsibilities: options.max_responsibilities,
     }
 }
 
