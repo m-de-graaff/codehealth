@@ -211,7 +211,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codehealth-autofix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-parser",
@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-rules",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-duplication"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-symbols",
@@ -284,14 +284,14 @@ dependencies = [
 
 [[package]]
 name = "codehealth-integrations"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
 ]
 
 [[package]]
 name = "codehealth-language-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-parser",
  "codehealth-symbols",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-language-rust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-parser",
  "codehealth-symbols",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-language-typescript"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-parser",
  "codehealth-symbols",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-parser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror",
  "tree-sitter",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-reporters"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-rules",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-rules"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-parser",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-rules-fastapi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-parser",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-rules-react"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-parser",
@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-rules-rust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-parser",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-symbols"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "codehealth-parser",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-testing"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-core",
  "insta",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "codehealth-workspace"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "codehealth-parser",
  "globset",
