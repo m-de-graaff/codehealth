@@ -1016,6 +1016,94 @@ fn metadata_lines(finding: &Finding) -> Vec<String> {
         return lines;
     }
 
+    if finding.rule_id == "duplicate.near.function" {
+        let similarity = metadata_usize(finding, "similarity_percent");
+        let names = metadata_string_array(finding, "symbol_names");
+        let signals = metadata_string_array(finding, "signals");
+        let skipped_buckets = metadata_usize(finding, "skipped_large_buckets");
+        let candidate_limit_reached = metadata_bool(finding, "candidate_limit_reached");
+        let mut lines = Vec::new();
+        if !names.is_empty() {
+            lines.push(format!("Symbols: {}", names.join(", ")));
+        }
+        if let Some(similarity) = similarity {
+            lines.push(format!("Similarity: {similarity}%"));
+        }
+        if !signals.is_empty() {
+            lines.push(format!("Signals: {}", signals.join(", ")));
+        }
+        if skipped_buckets.unwrap_or(0) > 0 || candidate_limit_reached == Some(true) {
+            lines.push(format!(
+                "Search limits: skipped large buckets: {}; candidate limit reached: {}",
+                skipped_buckets.unwrap_or(0),
+                candidate_limit_reached.unwrap_or(false)
+            ));
+        }
+        return lines;
+    }
+
+    if finding.rule_id == "duplicate.semantic.function" {
+        let hash = finding
+            .metadata
+            .get("semantic_hash")
+            .and_then(|value| value.as_str())
+            .map(|value| value.chars().take(12).collect::<String>());
+        let names = metadata_string_array(finding, "symbol_names");
+        let rewrites = metadata_string_array(finding, "semantic_rewrites");
+        let warnings = metadata_string_array(finding, "safety_warnings");
+        let evidence = metadata_string_array(finding, "type_evidence");
+        let mut lines = Vec::new();
+        if !names.is_empty() {
+            lines.push(format!("Symbols: {}", names.join(", ")));
+        }
+        if let Some(hash) = hash {
+            lines.push(format!("Semantic hash: {hash}"));
+        }
+        if !rewrites.is_empty() {
+            lines.push(format!("Semantic rewrites: {}", rewrites.join(", ")));
+        }
+        if !evidence.is_empty() {
+            lines.push(format!("Type evidence: {}", evidence.join(", ")));
+        }
+        if !warnings.is_empty() {
+            lines.push(format!("Caveats: {}", warnings.join("; ")));
+        }
+        return lines;
+    }
+
+    if finding.rule_id == "duplicate.semantic.vector_candidate" {
+        let vector_score = metadata_usize(finding, "vector_score");
+        let rank_score = metadata_usize(finding, "rank_score");
+        let names = metadata_string_array(finding, "symbol_names");
+        let signals = metadata_string_array(finding, "deterministic_signals");
+        let provider = finding
+            .metadata
+            .get("embedding_provider")
+            .and_then(|value| value.as_str());
+        let privacy = finding
+            .metadata
+            .get("privacy_mode")
+            .and_then(|value| value.as_str());
+        let mut lines = Vec::new();
+        if !names.is_empty() {
+            lines.push(format!("Symbols: {}", names.join(", ")));
+        }
+        if let (Some(provider), Some(privacy)) = (provider, privacy) {
+            lines.push(format!(
+                "Embedding provider: {provider}; privacy: {privacy}"
+            ));
+        }
+        if let (Some(vector_score), Some(rank_score)) = (vector_score, rank_score) {
+            lines.push(format!(
+                "Vector score: {vector_score}%; rank score: {rank_score}%"
+            ));
+        }
+        if !signals.is_empty() {
+            lines.push(format!("Deterministic signals: {}", signals.join(", ")));
+        }
+        return lines;
+    }
+
     if finding.kind == FindingKind::DuplicateName {
         if let (Some(scope), Some(score)) = (
             finding
@@ -1723,6 +1811,7 @@ fn category_value(finding: &Finding) -> &'static str {
         FindingKind::React => "react",
         FindingKind::FastApi => "fastapi",
         FindingKind::Rust => "rust_idiom",
+        FindingKind::ExternalTool => "external",
     }
 }
 
@@ -1737,6 +1826,7 @@ fn kind_value(kind: FindingKind) -> &'static str {
         FindingKind::React => "react",
         FindingKind::FastApi => "fastapi",
         FindingKind::Rust => "rust",
+        FindingKind::ExternalTool => "external_tool",
     }
 }
 
@@ -1791,6 +1881,24 @@ fn duplicate_group_key(finding: &Finding) -> Option<String> {
             finding
                 .metadata
                 .get("canonical_hash")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            finding
+                .metadata
+                .get("semantic_hash")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            finding
+                .metadata
+                .get("vector_group_hash")
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            finding
+                .metadata
+                .get("near_group_hash")
                 .and_then(|value| value.as_str())
         })
         .or_else(|| {

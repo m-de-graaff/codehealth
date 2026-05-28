@@ -11,6 +11,26 @@ fn fixture(path: &str) -> PathBuf {
     workspace_root().join("fixtures").join(path)
 }
 
+fn near_duplicate_typescript_fixture() -> &'static str {
+    r#"
+export function normalizeUser(input: { email?: string; name?: string; age?: number }): string[] {
+  const errors: string[] = [];
+  if (!input.email) errors.push("email required");
+  if (!input.name) errors.push("name required");
+  if (input.age && input.age < 18) errors.push("too young");
+  return errors;
+}
+
+export function normalizeCustomer(input: { email?: string; name?: string; age?: number }): string[] {
+  const errors: string[] = [];
+  if (!input.email) errors.push("email required");
+  if (!input.name) errors.push("full name required");
+  if (input.age && input.age < 21) errors.push("too young");
+  return errors;
+}
+"#
+}
+
 #[test]
 fn root_command_prints_help() {
     let mut command = Command::cargo_bin("codehealth").expect("binary exists");
@@ -1189,6 +1209,69 @@ edition = "2021"
 }
 
 #[test]
+fn external_tool_unavailable_is_nonfatal_by_default() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+[integrations]
+eslint = true
+eslint_command = "definitely-not-codehealth-eslint"
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("app.ts"),
+        "export const value: number = 1;\n",
+    )
+    .expect("write typescript");
+
+    let json = scan_json_with_config(temp.path(), &config);
+    let ids = finding_ids(&json);
+    let finding = finding_by_rule(&json, "external.eslint.unavailable");
+
+    assert!(ids.contains(&"external.eslint.unavailable".to_string()));
+    assert_eq!(finding["kind"], "external_tool");
+    assert_eq!(finding["metadata"]["external_tool"], "eslint");
+}
+
+#[test]
+fn external_tool_failure_can_block_when_configured() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+[integrations]
+eslint = true
+eslint_command = "definitely-not-codehealth-eslint"
+fail_on_tool_error = true
+"#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("app.ts"),
+        "export const value: number = 1;\n",
+    )
+    .expect("write typescript");
+
+    Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .arg("--fail-on")
+        .arg("high")
+        .arg("--format")
+        .arg("json")
+        .assert()
+        .failure()
+        .code(1);
+}
+
+#[test]
 fn suggestion_only_style_findings_are_not_applied_by_fix_safe() {
     let temp = tempfile::tempdir().expect("tempdir");
     let file = temp.path().join("risky.py");
@@ -1631,6 +1714,497 @@ export function sum(a: number, b: number): number {
         structural["metadata"]["symbol_names"],
         serde_json::json!(["add", "sum"])
     );
+}
+
+#[test]
+fn near_duplicates_are_opt_in() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("validators.ts"),
+        near_duplicate_typescript_fixture(),
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("Findings: 0"));
+}
+
+#[test]
+fn near_duplicate_functions_are_reported_with_similarity_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("validators.ts"),
+        near_duplicate_typescript_fixture(),
+    )
+    .expect("write ts");
+
+    let output = Command::cargo_bin("codehealth")
+        .expect("binary exists")
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("valid json");
+    let finding = finding_by_rule(&json, "duplicate.near.function");
+
+    assert_eq!(finding["kind"], "near_duplicate");
+    assert!(
+        finding["metadata"]["similarity_score"]
+            .as_u64()
+            .expect("similarity")
+            >= 82
+    );
+    assert!(finding["metadata"]["near_group_hash"].as_str().is_some());
+    assert_eq!(
+        finding["metadata"]["symbol_names"],
+        serde_json::json!(["normalizeCustomer", "normalizeUser"])
+    );
+    assert!(!finding["relatedLocations"]
+        .as_array()
+        .expect("related locations")
+        .is_empty());
+}
+
+#[test]
+fn near_duplicate_threshold_can_hide_candidates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = true
+            near_similarity_threshold = 95
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("validators.ts"),
+        near_duplicate_typescript_fixture(),
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("Findings: 0"));
+}
+
+#[test]
+fn semantic_duplicates_are_opt_in() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("math.ts"),
+        r#"
+export const add = (x: number, y: number) => x + y;
+export const sum = (a: number, b: number) => b + a;
+"#,
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("duplicate.semantic.function").not());
+}
+
+#[test]
+fn vector_embeddings_mode_is_optional_and_noop_by_default_provider() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = false
+
+            [embeddings]
+            enabled = true
+            provider = "none"
+            privacy_mode = "local_only"
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("math.ts"),
+        r#"
+export function first(value: number): number {
+  return value + 1;
+}
+
+export function second(value: number): number {
+  return value + 1;
+}
+"#,
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("duplicate.semantic.vector_candidate").not());
+}
+
+#[test]
+fn semantic_duplicates_report_typed_typescript_commutativity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("math.ts"),
+        r#"
+export const add = (x: number, y: number) => x + y;
+export const sum = (a: number, b: number) => b + a;
+"#,
+    )
+    .expect("write ts");
+
+    let json = scan_json_with_config(temp.path(), &config);
+    let finding = finding_by_rule(&json, "duplicate.semantic.function");
+
+    assert_eq!(finding["kind"], "semantic_candidate");
+    assert_eq!(finding["confidence"], "high");
+    assert!(finding["metadata"]["semantic_hash"].as_str().is_some());
+    assert_eq!(
+        finding["metadata"]["semantic_rewrites"],
+        serde_json::json!(["commutative_numeric_add"])
+    );
+    assert_eq!(
+        finding["metadata"]["symbol_names"],
+        serde_json::json!(["add", "sum"])
+    );
+}
+
+#[test]
+fn semantic_duplicates_do_not_treat_typescript_string_plus_as_commutative() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("strings.ts"),
+        r#"
+export const left = (x: string, y: string) => x + y;
+export const right = (a: string, b: string) => b + a;
+"#,
+    )
+    .expect("write ts");
+    let json = scan_json_with_config(temp.path(), &config);
+
+    assert!(!finding_ids(&json).contains(&"duplicate.semantic.function".to_string()));
+}
+
+#[test]
+fn semantic_duplicates_do_not_reorder_effectful_calls() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("calls.ts"),
+        r#"
+declare function first(): number;
+declare function second(): number;
+
+export function same(): boolean {
+  return first() === second();
+}
+
+export function swapped(): boolean {
+  return second() === first();
+}
+"#,
+    )
+    .expect("write ts");
+    let json = scan_json_with_config(temp.path(), &config);
+
+    assert!(!finding_ids(&json).contains(&"duplicate.semantic.function".to_string()));
+}
+
+#[test]
+fn semantic_duplicates_report_strict_equality_operand_order() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("equality.ts"),
+        r#"
+export function isSame(x: number, y: number): boolean {
+  return x === y;
+}
+
+export function isEqual(a: number, b: number): boolean {
+  return b === a;
+}
+"#,
+    )
+    .expect("write ts");
+    let json = scan_json_with_config(temp.path(), &config);
+    let finding = finding_by_rule(&json, "duplicate.semantic.function");
+
+    assert_eq!(
+        finding["metadata"]["semantic_rewrites"],
+        serde_json::json!(["equality_operand_order"])
+    );
+}
+
+#[test]
+fn semantic_duplicates_report_boolean_return_simplification() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("vote.ts"),
+        r#"
+export function canVote(age: number): boolean {
+  if (age >= 18) return true;
+  return false;
+}
+
+export function isAdult(years: number): boolean {
+  return years >= 18;
+}
+"#,
+    )
+    .expect("write ts");
+    let json = scan_json_with_config(temp.path(), &config);
+    let finding = finding_by_rule(&json, "duplicate.semantic.function");
+
+    assert!(finding["metadata"]["semantic_rewrites"]
+        .as_array()
+        .expect("rewrites")
+        .iter()
+        .any(|rewrite| rewrite == "boolean_return_simplification"));
+}
+
+#[test]
+fn semantic_duplicates_report_python_boolean_return_candidates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("vote.py"),
+        r#"
+def can_vote(age: int) -> bool:
+    if age >= 18:
+        return True
+    return False
+
+def is_adult(years: int) -> bool:
+    return years >= 18
+"#,
+    )
+    .expect("write python");
+    let json = scan_json_with_config(temp.path(), &config);
+    let finding = finding_by_rule(&json, "duplicate.semantic.function");
+
+    assert_eq!(finding["confidence"], "medium");
+    assert!(finding["metadata"]["semantic_rewrites"]
+        .as_array()
+        .expect("rewrites")
+        .iter()
+        .any(|rewrite| rewrite == "boolean_return_simplification"));
+}
+
+#[test]
+fn semantic_duplicates_report_rust_primitive_numeric_commutativity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = false
+            detect_near = false
+            detect_semantic_candidates = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("math.rs"),
+        r#"
+pub fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+pub fn sum(a: i32, b: i32) -> i32 {
+    b + a
+}
+"#,
+    )
+    .expect("write rust");
+    let json = scan_json_with_config(temp.path(), &config);
+    let finding = finding_by_rule(&json, "duplicate.semantic.function");
+
+    assert_eq!(finding["confidence"], "high");
+    assert_eq!(
+        finding["metadata"]["semantic_rewrites"],
+        serde_json::json!(["commutative_numeric_add"])
+    );
+}
+
+#[test]
+fn structural_duplicates_do_not_also_report_near_duplicates() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = temp.path().join("codehealth.toml");
+    std::fs::write(
+        &config,
+        r#"
+            [duplication]
+            detect_exact = false
+            detect_names = false
+            detect_structural = true
+            detect_near = true
+        "#,
+    )
+    .expect("write config");
+    std::fs::write(
+        temp.path().join("math.ts"),
+        r#"
+export function add(x: number, y: number): number {
+  return x + y;
+}
+
+export function sum(a: number, b: number): number {
+  return a + b;
+}
+"#,
+    )
+    .expect("write ts");
+    let mut command = Command::cargo_bin("codehealth").expect("binary exists");
+
+    command
+        .arg("scan")
+        .arg(temp.path())
+        .arg("--config")
+        .arg(config)
+        .assert()
+        .success()
+        .stdout(contains("duplicate.structural.function"))
+        .stdout(predicate::str::contains("duplicate.near.function").not());
 }
 
 #[test]

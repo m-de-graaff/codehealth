@@ -508,8 +508,17 @@ fn entry_for_finding(
 }
 
 fn semantic_key(finding: &Finding, context_hash: &str) -> String {
-    metadata_string(finding, "canonical_hash")
+    metadata_string(finding, "semantic_hash")
         .map(|value| format!("content:{value}"))
+        .or_else(|| {
+            metadata_string(finding, "canonical_hash").map(|value| format!("content:{value}"))
+        })
+        .or_else(|| {
+            metadata_string(finding, "vector_group_hash").map(|value| format!("content:{value}"))
+        })
+        .or_else(|| {
+            metadata_string(finding, "near_group_hash").map(|value| format!("content:{value}"))
+        })
         .or_else(|| {
             metadata_string(finding, "normalized_body_hash").map(|value| format!("content:{value}"))
         })
@@ -536,7 +545,10 @@ fn matching_keys(
         finding.rule_id,
         normalize_path_string(path)
     ));
-    if let Some(value) = metadata_string(finding, "canonical_hash")
+    if let Some(value) = metadata_string(finding, "semantic_hash")
+        .or_else(|| metadata_string(finding, "canonical_hash"))
+        .or_else(|| metadata_string(finding, "vector_group_hash"))
+        .or_else(|| metadata_string(finding, "near_group_hash"))
         .or_else(|| metadata_string(finding, "normalized_body_hash"))
         .or_else(|| metadata_string(finding, "normalized_file_hash"))
     {

@@ -196,6 +196,7 @@ pub enum FindingKind {
     React,
     FastApi,
     Rust,
+    ExternalTool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

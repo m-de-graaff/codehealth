@@ -1,7 +1,7 @@
 use codehealth_core::{Confidence, Severity};
 use codehealth_rules::{canonical_rule_id, rule_catalog};
 use globset::{Glob, GlobSetBuilder};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::BTreeMap,
     fmt,
@@ -32,6 +32,18 @@ min_confidence = "medium"
 structural_normalize_literals = false
 structural_min_nodes = 5
 structural_max_opaque_percent = 25
+near_similarity_threshold = 82
+near_hash_functions = 96
+near_lsh_bands = 24
+near_lsh_rows = 4
+near_common_shingle_max_percent = 5
+near_common_shingle_min_occurrences = 20
+near_max_bucket_size = 200
+near_max_candidate_pairs = 250000
+semantic_property_reads_are_pure = false
+semantic_normalize_boolean_returns = true
+semantic_normalize_commutative_ops = true
+semantic_normalize_comparisons = true
 
 [style]
 simplify_boolean_returns = true
@@ -108,6 +120,9 @@ paths = [
 "duplicate.name.rust_type" = "warn"
 "duplicate.name.rust_impl_method" = "warn"
 "duplicate.structural.function" = "warn"
+"duplicate.near.function" = "warn"
+"duplicate.semantic.function" = "warn"
+"duplicate.semantic.vector_candidate" = "info"
 "style.boolean_return_simplifiable" = "warn"
 "style.expression_arrow_simplifiable" = "warn"
 "style.unnecessary_else_after_return" = "info"
@@ -181,6 +196,20 @@ exclude_paths = []
 [rule_options."duplicate.structural.function"]
 min_tokens = 5
 min_lines = 1
+include_paths = []
+exclude_paths = []
+
+[rule_options."duplicate.near.function"]
+min_tokens = 40
+min_lines = 5
+min_confidence = "medium"
+include_paths = []
+exclude_paths = []
+
+[rule_options."duplicate.semantic.function"]
+min_tokens = 5
+min_lines = 1
+min_confidence = "medium"
 include_paths = []
 exclude_paths = []
 
@@ -342,6 +371,45 @@ color = "auto"
 [scoring]
 enabled = true
 
+[embeddings]
+enabled = false
+provider = "none"
+privacy_mode = "disabled"
+similarity_threshold = 0.80
+candidate_limit = 100
+cache_vectors = true
+
+[integrations]
+eslint = false
+biome = false
+tsc = false
+ruff = false
+mypy = false
+pyright = false
+cargo_check = false
+clippy = false
+semgrep = false
+fail_on_tool_error = false
+timeout_ms = 120000
+eslint_command = "eslint"
+eslint_args = ["--format", "json", "."]
+biome_command = "biome"
+biome_args = ["ci", "--reporter=json"]
+tsc_command = "tsc"
+tsc_args = ["--noEmit", "--pretty", "false"]
+ruff_command = "ruff"
+ruff_args = ["check", "--output-format=json", "."]
+mypy_command = "mypy"
+mypy_args = ["--show-column-numbers", "--no-error-summary", "."]
+pyright_command = "pyright"
+pyright_args = ["--outputjson"]
+cargo_check_command = "cargo"
+cargo_check_args = ["check", "--message-format=json"]
+clippy_command = "cargo"
+clippy_args = ["clippy", "--message-format=json", "--all-targets", "--all-features"]
+semgrep_command = "semgrep"
+semgrep_args = ["scan", "--json"]
+
 [cache]
 enabled = true
 dir = ".codehealth/cache"
@@ -373,6 +441,8 @@ pub struct CodehealthConfig {
     pub path_overrides: Vec<PathOverride>,
     pub report: ReportConfig,
     pub scoring: ScoringConfig,
+    pub embeddings: EmbeddingsConfig,
+    pub integrations: IntegrationsConfig,
     pub cache: CacheConfig,
 }
 
@@ -423,6 +493,17 @@ impl CodehealthConfig {
         validate_frameworks(&self.project.frameworks)?;
         validate_fail_on(&self.ci.fail_on)?;
         validate_report_format(&self.report.default_format)?;
+        validate_embedding_provider(&self.embeddings.provider)?;
+        validate_embedding_privacy_mode(&self.embeddings.privacy_mode)?;
+        validate_similarity_threshold(
+            self.embeddings.similarity_threshold,
+            "embeddings.similarity_threshold",
+        )?;
+        validate_positive_usize(
+            self.embeddings.candidate_limit,
+            "embeddings.candidate_limit",
+        )?;
+        validate_positive_size(self.integrations.timeout_ms, "integrations.timeout_ms")?;
         validate_response_model_level(&self.fastapi.require_response_model)?;
         validate_patterns(&self.scanner.include, "scanner.include")?;
         validate_patterns(&self.scanner.exclude, "scanner.exclude")?;
@@ -434,6 +515,67 @@ impl CodehealthConfig {
             self.duplication.structural_max_opaque_percent,
             "duplication.structural_max_opaque_percent",
         )?;
+        validate_percentage(
+            self.duplication.near_similarity_threshold,
+            "duplication.near_similarity_threshold",
+        )?;
+        if self.duplication.near_similarity_threshold == 0 {
+            return Err(ConfigValidationError::InvalidValue {
+                context: "duplication.near_similarity_threshold".to_string(),
+                value: self.duplication.near_similarity_threshold.to_string(),
+                expected: vec!["integer from 1 through 100".to_string()],
+            }
+            .into());
+        }
+        validate_positive_usize(
+            self.duplication.near_hash_functions,
+            "duplication.near_hash_functions",
+        )?;
+        validate_positive_usize(
+            self.duplication.near_lsh_bands,
+            "duplication.near_lsh_bands",
+        )?;
+        validate_positive_usize(self.duplication.near_lsh_rows, "duplication.near_lsh_rows")?;
+        validate_percentage(
+            self.duplication.near_common_shingle_max_percent,
+            "duplication.near_common_shingle_max_percent",
+        )?;
+        validate_positive_usize(
+            self.duplication.near_common_shingle_min_occurrences,
+            "duplication.near_common_shingle_min_occurrences",
+        )?;
+        validate_positive_usize(
+            self.duplication.near_max_bucket_size,
+            "duplication.near_max_bucket_size",
+        )?;
+        validate_positive_usize(
+            self.duplication.near_max_candidate_pairs,
+            "duplication.near_max_candidate_pairs",
+        )?;
+        let Some(expected_near_hash_functions) = self
+            .duplication
+            .near_lsh_bands
+            .checked_mul(self.duplication.near_lsh_rows)
+        else {
+            return Err(ConfigValidationError::InvalidValue {
+                context: "duplication.near_lsh_bands".to_string(),
+                value: self.duplication.near_lsh_bands.to_string(),
+                expected: vec![
+                    "multiplication with duplication.near_lsh_rows must fit usize".to_string(),
+                ],
+            }
+            .into());
+        };
+        if self.duplication.near_hash_functions != expected_near_hash_functions {
+            return Err(ConfigValidationError::InvalidValue {
+                context: "duplication.near_hash_functions".to_string(),
+                value: self.duplication.near_hash_functions.to_string(),
+                expected: vec![
+                    "equal to duplication.near_lsh_bands * duplication.near_lsh_rows".to_string(),
+                ],
+            }
+            .into());
+        }
 
         self.rules = canonicalize_rule_map(&self.rules, "rules")?;
         self.rule_options = canonicalize_rule_options(&self.rule_options)?;
@@ -558,6 +700,18 @@ pub struct DuplicationConfig {
     pub structural_normalize_literals: bool,
     pub structural_min_nodes: usize,
     pub structural_max_opaque_percent: u8,
+    pub near_similarity_threshold: u8,
+    pub near_hash_functions: usize,
+    pub near_lsh_bands: usize,
+    pub near_lsh_rows: usize,
+    pub near_common_shingle_max_percent: u8,
+    pub near_common_shingle_min_occurrences: usize,
+    pub near_max_bucket_size: usize,
+    pub near_max_candidate_pairs: usize,
+    pub semantic_property_reads_are_pure: bool,
+    pub semantic_normalize_boolean_returns: bool,
+    pub semantic_normalize_commutative_ops: bool,
+    pub semantic_normalize_comparisons: bool,
 }
 
 impl Default for DuplicationConfig {
@@ -575,6 +729,18 @@ impl Default for DuplicationConfig {
             structural_normalize_literals: false,
             structural_min_nodes: 5,
             structural_max_opaque_percent: 25,
+            near_similarity_threshold: 82,
+            near_hash_functions: 96,
+            near_lsh_bands: 24,
+            near_lsh_rows: 4,
+            near_common_shingle_max_percent: 5,
+            near_common_shingle_min_occurrences: 20,
+            near_max_bucket_size: 200,
+            near_max_candidate_pairs: 250_000,
+            semantic_property_reads_are_pure: false,
+            semantic_normalize_boolean_returns: true,
+            semantic_normalize_commutative_ops: true,
+            semantic_normalize_comparisons: true,
         }
     }
 }
@@ -804,6 +970,218 @@ pub struct ScoringConfig {
 impl Default for ScoringConfig {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingsConfig {
+    pub enabled: bool,
+    pub provider: String,
+    pub privacy_mode: String,
+    pub similarity_threshold: SimilarityThreshold,
+    pub candidate_limit: usize,
+    pub cache_vectors: bool,
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "none".to_string(),
+            privacy_mode: "disabled".to_string(),
+            similarity_threshold: SimilarityThreshold::from_basis_points(8_000),
+            candidate_limit: 100,
+            cache_vectors: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrationsConfig {
+    pub eslint: bool,
+    pub biome: bool,
+    pub tsc: bool,
+    pub ruff: bool,
+    pub mypy: bool,
+    pub pyright: bool,
+    pub cargo_check: bool,
+    pub clippy: bool,
+    pub semgrep: bool,
+    pub fail_on_tool_error: bool,
+    pub timeout_ms: u64,
+    pub eslint_command: String,
+    pub eslint_args: Vec<String>,
+    pub biome_command: String,
+    pub biome_args: Vec<String>,
+    pub tsc_command: String,
+    pub tsc_args: Vec<String>,
+    pub ruff_command: String,
+    pub ruff_args: Vec<String>,
+    pub mypy_command: String,
+    pub mypy_args: Vec<String>,
+    pub pyright_command: String,
+    pub pyright_args: Vec<String>,
+    pub cargo_check_command: String,
+    pub cargo_check_args: Vec<String>,
+    pub clippy_command: String,
+    pub clippy_args: Vec<String>,
+    pub semgrep_command: String,
+    pub semgrep_args: Vec<String>,
+}
+
+impl Default for IntegrationsConfig {
+    fn default() -> Self {
+        Self {
+            eslint: false,
+            biome: false,
+            tsc: false,
+            ruff: false,
+            mypy: false,
+            pyright: false,
+            cargo_check: false,
+            clippy: false,
+            semgrep: false,
+            fail_on_tool_error: false,
+            timeout_ms: 120_000,
+            eslint_command: "eslint".to_string(),
+            eslint_args: vec!["--format".to_string(), "json".to_string(), ".".to_string()],
+            biome_command: "biome".to_string(),
+            biome_args: vec!["ci".to_string(), "--reporter=json".to_string()],
+            tsc_command: "tsc".to_string(),
+            tsc_args: vec![
+                "--noEmit".to_string(),
+                "--pretty".to_string(),
+                "false".to_string(),
+            ],
+            ruff_command: "ruff".to_string(),
+            ruff_args: vec![
+                "check".to_string(),
+                "--output-format=json".to_string(),
+                ".".to_string(),
+            ],
+            mypy_command: "mypy".to_string(),
+            mypy_args: vec![
+                "--show-column-numbers".to_string(),
+                "--no-error-summary".to_string(),
+                ".".to_string(),
+            ],
+            pyright_command: "pyright".to_string(),
+            pyright_args: vec!["--outputjson".to_string()],
+            cargo_check_command: "cargo".to_string(),
+            cargo_check_args: vec!["check".to_string(), "--message-format=json".to_string()],
+            clippy_command: "cargo".to_string(),
+            clippy_args: vec![
+                "clippy".to_string(),
+                "--message-format=json".to_string(),
+                "--all-targets".to_string(),
+                "--all-features".to_string(),
+            ],
+            semgrep_command: "semgrep".to_string(),
+            semgrep_args: vec!["scan".to_string(), "--json".to_string()],
+        }
+    }
+}
+
+impl IntegrationsConfig {
+    pub fn any_enabled(&self) -> bool {
+        self.eslint
+            || self.biome
+            || self.tsc
+            || self.ruff
+            || self.mypy
+            || self.pyright
+            || self.cargo_check
+            || self.clippy
+            || self.semgrep
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SimilarityThreshold {
+    basis_points: u16,
+}
+
+impl SimilarityThreshold {
+    pub const fn from_basis_points(basis_points: u16) -> Self {
+        Self { basis_points }
+    }
+
+    pub fn basis_points(self) -> u16 {
+        self.basis_points
+    }
+
+    pub fn as_ratio(self) -> f32 {
+        f32::from(self.basis_points) / 10_000.0
+    }
+
+    pub fn as_percent(self) -> u8 {
+        ((usize::from(self.basis_points) + 50) / 100)
+            .try_into()
+            .unwrap_or(100)
+    }
+}
+
+impl Default for SimilarityThreshold {
+    fn default() -> Self {
+        Self::from_basis_points(8_000)
+    }
+}
+
+impl Serialize for SimilarityThreshold {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(f64::from(self.basis_points) / 10_000.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SimilarityThreshold {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(SimilarityThresholdVisitor)
+    }
+}
+
+struct SimilarityThresholdVisitor;
+
+impl<'de> Visitor<'de> for SimilarityThresholdVisitor {
+    type Value = SimilarityThreshold;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a number from 0.0 through 1.0")
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if !(0.0..=1.0).contains(&value) || !value.is_finite() {
+            return Err(E::custom("expected a number from 0.0 through 1.0"));
+        }
+        Ok(SimilarityThreshold::from_basis_points(
+            (value * 10_000.0).round() as u16,
+        ))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_f64(value as f64)
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_f64(value as f64)
     }
 }
 
@@ -1125,6 +1503,49 @@ fn validate_report_format(value: &str) -> Result<(), ConfigError> {
     validate_enum_list("report.default_format", &[value.to_string()], &allowed)
 }
 
+fn validate_embedding_provider(value: &str) -> Result<(), ConfigError> {
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(());
+    }
+
+    let expected = if ["local", "external"]
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(value))
+    {
+        vec!["none (local and external providers are reserved for a future version)".to_string()]
+    } else {
+        vec!["none".to_string()]
+    };
+
+    Err(ConfigValidationError::InvalidValue {
+        context: "embeddings.provider".to_string(),
+        value: value.to_string(),
+        expected,
+    }
+    .into())
+}
+
+fn validate_embedding_privacy_mode(value: &str) -> Result<(), ConfigError> {
+    let allowed = ["disabled", "local_only", "external_opt_in"];
+    validate_enum_list("embeddings.privacy_mode", &[value.to_string()], &allowed)
+}
+
+fn validate_similarity_threshold(
+    value: SimilarityThreshold,
+    context: &str,
+) -> Result<(), ConfigError> {
+    if value.basis_points() == 0 || value.basis_points() > 10_000 {
+        return Err(ConfigValidationError::InvalidValue {
+            context: context.to_string(),
+            value: format!("{:.4}", value.as_ratio()),
+            expected: vec!["number greater than 0.0 and at most 1.0".to_string()],
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
 fn validate_response_model_level(value: &str) -> Result<(), ConfigError> {
     let allowed = ["off", "warn", "error"];
     validate_enum_list(
@@ -1135,6 +1556,19 @@ fn validate_response_model_level(value: &str) -> Result<(), ConfigError> {
 }
 
 fn validate_positive_size(value: u64, context: &str) -> Result<(), ConfigError> {
+    if value == 0 {
+        return Err(ConfigValidationError::InvalidValue {
+            context: context.to_string(),
+            value: value.to_string(),
+            expected: vec!["positive integer".to_string()],
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
+fn validate_positive_usize(value: usize, context: &str) -> Result<(), ConfigError> {
     if value == 0 {
         return Err(ConfigValidationError::InvalidValue {
             context: context.to_string(),
@@ -1342,6 +1776,8 @@ mod tests {
         assert!(loaded.config.scanner.detect_javascript);
         assert!(loaded.config.ci.block_new_findings_only);
         assert!(loaded.config.scoring.enabled);
+        assert!(!loaded.config.embeddings.enabled);
+        assert_eq!(loaded.config.embeddings.provider, "none");
     }
 
     #[test]
@@ -1356,6 +1792,13 @@ mod tests {
             Some(&RuleLevel::Severity(Severity::High))
         );
         assert!(config.scoring.enabled);
+        assert_eq!(config.embeddings.similarity_threshold.basis_points(), 8_000);
+        assert!(!config.integrations.any_enabled());
+        assert_eq!(config.integrations.timeout_ms, 120_000);
+        assert_eq!(
+            config.rules.get("duplicate.semantic.vector_candidate"),
+            Some(&RuleLevel::Severity(Severity::Info))
+        );
     }
 
     #[test]
@@ -1387,6 +1830,56 @@ mod tests {
             .expect("valid scoring config");
 
         assert!(!config.scoring.enabled);
+    }
+
+    #[test]
+    fn parses_embedding_config() {
+        let raw = r#"
+            [embeddings]
+            enabled = true
+            provider = "none"
+            privacy_mode = "local_only"
+            similarity_threshold = 0.75
+            candidate_limit = 25
+            cache_vectors = false
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
+
+        config
+            .normalize_and_validate()
+            .expect("valid embedding config");
+
+        assert!(config.embeddings.enabled);
+        assert_eq!(config.embeddings.privacy_mode, "local_only");
+        assert_eq!(config.embeddings.similarity_threshold.basis_points(), 7_500);
+        assert_eq!(config.embeddings.similarity_threshold.as_percent(), 75);
+        assert_eq!(config.embeddings.candidate_limit, 25);
+        assert!(!config.embeddings.cache_vectors);
+    }
+
+    #[test]
+    fn parses_integrations_config() {
+        let raw = r#"
+            [integrations]
+            eslint = true
+            tsc = true
+            fail_on_tool_error = true
+            timeout_ms = 30000
+            eslint_command = "pnpm"
+            eslint_args = ["eslint", "--format", "json", "."]
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
+
+        config
+            .normalize_and_validate()
+            .expect("valid integrations config");
+
+        assert!(config.integrations.eslint);
+        assert!(config.integrations.tsc);
+        assert!(config.integrations.fail_on_tool_error);
+        assert_eq!(config.integrations.timeout_ms, 30_000);
+        assert_eq!(config.integrations.eslint_command, "pnpm");
+        assert_eq!(config.integrations.eslint_args[0], "eslint");
     }
 
     #[test]
@@ -1457,6 +1950,81 @@ mod tests {
             .expect_err("invalid scanner");
 
         assert!(error.to_string().contains("scanner.max_file_size_bytes"));
+    }
+
+    #[test]
+    fn validates_near_duplicate_lsh_options() {
+        let raw = r#"
+            [duplication]
+            near_hash_functions = 95
+            near_lsh_bands = 24
+            near_lsh_rows = 4
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(raw).expect("valid toml");
+
+        let error = config
+            .normalize_and_validate()
+            .expect_err("invalid near duplicate config");
+
+        assert!(error
+            .to_string()
+            .contains("duplication.near_hash_functions"));
+    }
+
+    #[test]
+    fn rejects_reserved_embedding_providers() {
+        for provider in ["local", "external"] {
+            let raw = format!(
+                r#"
+                [embeddings]
+                provider = "{provider}"
+            "#
+            );
+            let mut config = CodehealthConfig::from_toml_str(&raw).expect("valid toml");
+
+            let error = config
+                .normalize_and_validate()
+                .expect_err("reserved provider");
+
+            assert!(error.to_string().contains("embeddings.provider"));
+            assert!(error.to_string().contains("reserved"));
+        }
+    }
+
+    #[test]
+    fn validates_embedding_privacy_threshold_and_limit() {
+        let invalid_privacy = r#"
+            [embeddings]
+            privacy_mode = "network"
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(invalid_privacy).expect("valid toml");
+        assert!(config
+            .normalize_and_validate()
+            .expect_err("invalid privacy")
+            .to_string()
+            .contains("embeddings.privacy_mode"));
+
+        let invalid_threshold = r#"
+            [embeddings]
+            similarity_threshold = 0.0
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(invalid_threshold).expect("valid toml");
+        assert!(config
+            .normalize_and_validate()
+            .expect_err("invalid threshold")
+            .to_string()
+            .contains("embeddings.similarity_threshold"));
+
+        let invalid_limit = r#"
+            [embeddings]
+            candidate_limit = 0
+        "#;
+        let mut config = CodehealthConfig::from_toml_str(invalid_limit).expect("valid toml");
+        assert!(config
+            .normalize_and_validate()
+            .expect_err("invalid limit")
+            .to_string()
+            .contains("embeddings.candidate_limit"));
     }
 
     #[test]

@@ -169,7 +169,11 @@ fn symbol_from_parser_definition(
         .as_ref()
         .map(|parent| format!("{parent}.{}", definition.name))
         .unwrap_or_else(|| definition.name.clone());
-    let signature_span = signature_span(definition.span, definition.body_span);
+    let signature_span = if definition.kind == DefinitionKind::ArrowFunction {
+        definition.body_span.unwrap_or(definition.span)
+    } else {
+        signature_span(definition.span, definition.body_span)
+    };
     let mut symbol = SymbolDefinition::new(
         language,
         kind,

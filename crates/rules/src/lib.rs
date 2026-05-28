@@ -12,6 +12,9 @@ pub use style::style_rules;
 
 pub const DUPLICATE_EXACT_FILE: &str = "duplicate.exact.file";
 pub const DUPLICATE_EXACT_BODY: &str = "duplicate.exact.body";
+pub const DUPLICATE_NEAR_FUNCTION: &str = "duplicate.near.function";
+pub const DUPLICATE_SEMANTIC_FUNCTION: &str = "duplicate.semantic.function";
+pub const DUPLICATE_SEMANTIC_VECTOR_CANDIDATE: &str = "duplicate.semantic.vector_candidate";
 pub const STYLE_BOOLEAN_RETURN_SIMPLIFIABLE: &str = "style.boolean_return_simplifiable";
 pub const STYLE_EXPRESSION_ARROW_SIMPLIFIABLE: &str = "style.expression_arrow_simplifiable";
 pub const STYLE_UNNECESSARY_ELSE_AFTER_RETURN: &str = "style.unnecessary_else_after_return";
@@ -379,12 +382,60 @@ pub fn rule_catalog() -> Vec<RuleMetadata> {
             autofix: AutofixSafety::SuggestionOnly,
             autofix_explanation: "Structural duplicates are not auto-fixed because same shape can still represent intentionally separate domain behavior, public APIs, ownership rules, or side effects.",
         },
-        planned(
-            "duplicate.near.function",
-            &["duplicate.near_function"],
-            "Near duplicate function",
-            FindingKind::NearDuplicate,
-        ),
+        RuleMetadata {
+            code: DUPLICATE_NEAR_FUNCTION,
+            aliases: &["duplicate.near_function"],
+            name: "Near duplicate function",
+            description: "Finds functions, methods, components, hooks, and route handlers that are suspiciously similar but not identical.",
+            category: "duplication",
+            kind: FindingKind::NearDuplicate,
+            default_severity: Severity::Medium,
+            default_confidence: Confidence::Medium,
+            implemented: true,
+            language: None,
+            framework: None,
+            explanation: "Finds same-language callable definitions with high shingle and signature similarity. This is a clone signal, not proof of identical behavior.",
+            remediation: "Compare intent, then extract a shared helper, consolidate validation, keep the code separate with documentation, or suppress intentional duplication with a reason.",
+            detection_reason: "Definitions are indexed with normalized token, AST path, statement, call, control-flow, and MinHash signatures, then compared from locality-sensitive hashing candidates.",
+            autofix: AutofixSafety::SuggestionOnly,
+            autofix_explanation: "Near duplicates are not auto-fixed because extracting shared logic can change APIs, imports, side effects, and domain ownership.",
+        },
+        RuleMetadata {
+            code: DUPLICATE_SEMANTIC_FUNCTION,
+            aliases: &["duplicate.semantic_function"],
+            name: "Semantic duplicate candidate",
+            description: "Finds functions, methods, components, hooks, and route handlers that share a conservative semantic fingerprint after safe expression normalization.",
+            category: "duplication",
+            kind: FindingKind::SemanticCandidate,
+            default_severity: Severity::Medium,
+            default_confidence: Confidence::Medium,
+            implemented: true,
+            language: None,
+            framework: None,
+            explanation: "Finds same-language callable definitions that normalize to the same conservative semantic fingerprint. This is a candidate signal, not proof of identical runtime behavior.",
+            remediation: "Compare intent and edge cases, then extract a shared helper, consolidate validation, keep the code separate with documentation, or suppress intentional duplication with a reason.",
+            detection_reason: "Definitions are grouped by a semantic hash after conservative rewrites such as typed numeric operand ordering, equality operand ordering, comparison inversion, and boolean-return simplification.",
+            autofix: AutofixSafety::SuggestionOnly,
+            autofix_explanation: "Semantic duplicate candidates are not auto-fixed because refactoring can alter APIs, imports, side effects, ownership, async behavior, and domain boundaries.",
+        },
+        RuleMetadata {
+            code: DUPLICATE_SEMANTIC_VECTOR_CANDIDATE,
+            aliases: &["duplicate.semantic_vector_candidate"],
+            name: "Vector semantic candidate",
+            description: "Finds callable definitions that are conceptually similar by embedding search and also pass deterministic similarity filters.",
+            category: "duplication",
+            kind: FindingKind::SemanticCandidate,
+            default_severity: Severity::Info,
+            default_confidence: Confidence::Low,
+            implemented: true,
+            language: None,
+            framework: None,
+            explanation: "Finds vector-discovered candidates that also share deterministic AST, signature, call, name, or framework signals. These functions appear conceptually similar, but deterministic equivalence was not proven.",
+            remediation: "Compare intent and edge cases, then extract a shared helper, consolidate validation, keep the code separate with documentation, or suppress intentional duplication with a reason.",
+            detection_reason: "Compact function summaries are embedded only when embeddings are explicitly enabled, then nearest-neighbor candidates are filtered and ranked with deterministic code signals.",
+            autofix: AutofixSafety::SuggestionOnly,
+            autofix_explanation: "Vector candidates are not auto-fixed because embeddings are only a discovery mechanism and do not prove behavior equivalence.",
+        },
         style_rule(
             STYLE_BOOLEAN_RETURN_SIMPLIFIABLE,
             "Boolean return simplifiable",
@@ -862,34 +913,6 @@ pub fn find_rule(code: &str) -> Option<RuleMetadata> {
     })
 }
 
-fn planned(
-    code: &'static str,
-    aliases: &'static [&'static str],
-    name: &'static str,
-    kind: FindingKind,
-) -> RuleMetadata {
-    RuleMetadata {
-        code,
-        aliases,
-        name,
-        description:
-            "This rule is part of the v1 taxonomy but is not implemented in the CLI foundation yet.",
-        category: category_for_kind(kind),
-        kind,
-        default_severity: Severity::Low,
-        default_confidence: Confidence::Medium,
-        implemented: false,
-        language: None,
-        framework: None,
-        explanation:
-            "This rule is part of the v1 taxonomy but is not implemented in the CLI foundation yet.",
-        remediation: "No automated recommendation is available until the detector is implemented.",
-        detection_reason: "Not implemented in this phase.",
-        autofix: AutofixSafety::Unavailable,
-        autofix_explanation: "No detector output exists for this rule yet.",
-    }
-}
-
 fn style_rule(
     code: &'static str,
     name: &'static str,
@@ -1010,20 +1033,6 @@ fn rust_rule(
         autofix: AutofixSafety::SuggestionOnly,
         autofix_explanation:
             "Suggestion only. Rust refactors can affect ownership, lifetimes, public APIs, error semantics, and macro-expanded behavior.",
-    }
-}
-
-fn category_for_kind(kind: FindingKind) -> &'static str {
-    match kind {
-        FindingKind::DuplicateName
-        | FindingKind::ExactDuplicate
-        | FindingKind::StructuralDuplicate
-        | FindingKind::NearDuplicate
-        | FindingKind::SemanticCandidate => "duplication",
-        FindingKind::Style => "style",
-        FindingKind::React => "react",
-        FindingKind::FastApi => "fastapi",
-        FindingKind::Rust => "rust_idiom",
     }
 }
 

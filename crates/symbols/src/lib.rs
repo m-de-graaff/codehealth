@@ -124,6 +124,8 @@ pub struct Definition {
     pub signature: Signature,
     pub structural_fingerprint: Option<StructuralFingerprint>,
     pub literal_normalized_structural_fingerprint: Option<StructuralFingerprint>,
+    pub semantic_fingerprint: Option<SemanticFingerprint>,
+    pub property_read_semantic_fingerprint: Option<SemanticFingerprint>,
 }
 
 impl Definition {
@@ -158,6 +160,8 @@ impl Definition {
             signature: Signature::default(),
             structural_fingerprint: None,
             literal_normalized_structural_fingerprint: None,
+            semantic_fingerprint: None,
+            property_read_semantic_fingerprint: None,
         }
     }
 }

@@ -3,7 +3,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use codehealth_autofix::apply_safe_fixes;
 use codehealth_config::{
     config_path, default_config_toml, parse_suppressions, path_matches_any, CodehealthConfig,
-    LoadedConfig, SuppressionDirective, DEFAULT_CONFIG_FILE,
+    IntegrationsConfig, LoadedConfig, SuppressionDirective, DEFAULT_CONFIG_FILE,
 };
 use codehealth_core::{
     BaselineSummary, ComplexityMetric, Confidence, DefinitionMetric, Finding, FindingFilters,
@@ -11,10 +11,13 @@ use codehealth_core::{
     SummaryMetrics, SuppressedRuleMetric, Suppression, SuppressionKind,
 };
 use codehealth_duplication::{
-    find_exact_body_duplicates, find_exact_file_duplicates, find_structural_duplicates,
+    find_exact_body_duplicates, find_exact_file_duplicates, find_near_function_duplicates,
+    find_semantic_function_duplicates, find_structural_duplicates, find_vector_semantic_candidates,
     fingerprint_normalized_body, normalize_body_source, normalize_source, token_estimate,
-    DuplicateInput, ExactBodyOptions, StructuralOptions,
+    DuplicateInput, ExactBodyOptions, NearDuplicateOptions, NoopEmbeddingProvider,
+    SemanticDuplicateOptions, StructuralOptions, VectorCandidateOptions,
 };
+use codehealth_integrations::{merge_external_findings, run_external_tools};
 use codehealth_parser::{run_query, LanguageRegistry, QueryKind, SourceFile, SyntaxTree};
 use codehealth_reporters::{
     render_result_with_context, ReportContext, ReportFormat, ReportOptions, ReportTiming,
@@ -44,8 +47,6 @@ use std::{
 };
 
 mod baseline;
-mod clippy;
-
 fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
@@ -445,6 +446,7 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
     result.stats.files_skipped = workspace_scan.skipped.len();
     result.stats.config_files = workspace_scan.config_files.len();
     let workspace_metadata = workspace_scan.metadata.clone();
+    let workspace_config_files = workspace_scan.config_files.clone();
     let workspace_frameworks = workspace_metadata.frameworks();
     let rule_workspace = rule_workspace_metadata(&workspace_metadata);
     let files = workspace_scan.files;
@@ -457,6 +459,9 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
             && (config.duplication.detect_names
                 || config.duplication.detect_exact
                 || config.duplication.detect_structural
+                || config.duplication.detect_near
+                || config.duplication.detect_semantic_candidates
+                || config.embeddings.enabled
                 || (config.fastapi.enabled && config.fastapi.detect_duplicate_routes)));
     let symbol_index = if should_index_symbols {
         let build = build_symbol_index(
@@ -473,12 +478,17 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
         None
     };
 
-    let _accepted_but_not_active_yet = (args.jobs, args.no_cache, &args.cache_dir);
+    let effective_cache_dir = effective_cache_dir(&args, config);
+    let _accepted_but_not_active_yet = args.jobs;
 
     let mut findings = match mode {
-        ScanMode::All | ScanMode::DuplicatesOnly => {
-            run_duplicate_checks(&files, config, symbol_index.as_ref())?
-        }
+        ScanMode::All | ScanMode::DuplicatesOnly => run_duplicate_checks(
+            &files,
+            config,
+            symbol_index.as_ref(),
+            args.no_cache,
+            &effective_cache_dir,
+        )?,
     };
     if mode == ScanMode::All {
         findings.extend(run_style_checks(
@@ -490,11 +500,16 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
             &workspace_frameworks,
             &rule_workspace,
         )?);
-        let clippy_enabled = effective_clippy_enabled(&args, config);
-        if clippy_enabled {
-            let clippy_findings =
-                clippy::run_clippy_checks(config, &result.root, &workspace_metadata, &files);
-            merge_clippy_findings(&mut findings, clippy_findings);
+        let integrations = effective_integrations_config(&args, config);
+        if integrations.any_enabled() {
+            let external_findings = run_external_tools(
+                &integrations,
+                &result.root,
+                &workspace_metadata,
+                &workspace_config_files,
+                &files,
+            );
+            merge_external_findings(&mut findings, external_findings);
         }
     }
 
@@ -631,54 +646,17 @@ fn run_scan_with_options(args: RunArgs, mode: ScanMode, ci_mode: bool) -> anyhow
     }
 }
 
-fn effective_clippy_enabled(args: &RunArgs, config: &CodehealthConfig) -> bool {
+fn effective_integrations_config(args: &RunArgs, config: &CodehealthConfig) -> IntegrationsConfig {
+    let mut integrations = config.integrations.clone();
     if args.no_clippy {
-        false
-    } else {
-        args.with_clippy || config.rust.clippy_enabled
+        integrations.clippy = false;
+    } else if (args.with_clippy || config.rust.clippy_enabled) && !integrations.clippy {
+        integrations.clippy = true;
+        integrations.clippy_command = config.rust.clippy_command.clone();
+        integrations.clippy_args = config.rust.clippy_args.clone();
+        integrations.timeout_ms = config.rust.clippy_timeout_ms;
     }
-}
-
-fn merge_clippy_findings(findings: &mut Vec<Finding>, clippy_findings: Vec<Finding>) {
-    for clippy_finding in clippy_findings {
-        let Some(primary) = clippy_finding.locations.first() else {
-            findings.push(clippy_finding);
-            continue;
-        };
-        let Some(existing) = findings.iter_mut().find(|finding| {
-            finding.kind == FindingKind::Rust
-                && finding
-                    .locations
-                    .first()
-                    .is_some_and(|location| locations_overlap(location, primary))
-        }) else {
-            findings.push(clippy_finding);
-            continue;
-        };
-        let entry = existing
-            .metadata
-            .entry("clippy_overlaps".to_string())
-            .or_insert_with(|| serde_json::json!([]));
-        if let Some(values) = entry.as_array_mut() {
-            values.push(serde_json::json!(clippy_finding.rule_id));
-        }
-    }
-}
-
-fn locations_overlap(
-    left: &codehealth_core::FindingLocation,
-    right: &codehealth_core::FindingLocation,
-) -> bool {
-    if left.path != right.path {
-        return false;
-    }
-    let Some(left_span) = left.span else {
-        return false;
-    };
-    let Some(right_span) = right.span else {
-        return false;
-    };
-    left_span.start < right_span.end && right_span.start < left_span.end
+    integrations
 }
 
 fn filters_from_args(args: &RunArgs) -> FindingFilters {
@@ -729,6 +707,8 @@ fn run_duplicate_checks(
     files: &[WorkspaceFile],
     config: &CodehealthConfig,
     symbol_index: Option<&SymbolIndex>,
+    no_cache: bool,
+    cache_dir: &Path,
 ) -> anyhow::Result<Vec<Finding>> {
     if !config.duplication.enabled {
         return Ok(Vec::new());
@@ -765,6 +745,37 @@ fn run_duplicate_checks(
             findings.extend(find_structural_duplicates(
                 symbol_index,
                 structural_options(config),
+            ));
+        }
+    }
+
+    if config.duplication.detect_near {
+        if let Some(symbol_index) = symbol_index {
+            findings.extend(find_near_function_duplicates(
+                symbol_index,
+                near_duplicate_options(config),
+            ));
+        }
+    }
+
+    if config.duplication.detect_semantic_candidates {
+        if let Some(symbol_index) = symbol_index {
+            let semantic_findings =
+                find_semantic_function_duplicates(symbol_index, semantic_duplicate_options(config));
+            if config.duplication.detect_near {
+                remove_near_findings_shadowed_by_semantic(&mut findings, &semantic_findings);
+            }
+            findings.extend(semantic_findings);
+        }
+    }
+
+    if config.embeddings.enabled {
+        if let Some(symbol_index) = symbol_index {
+            let provider = NoopEmbeddingProvider;
+            findings.extend(find_vector_semantic_candidates(
+                symbol_index,
+                &provider,
+                vector_candidate_options(config, files, no_cache, cache_dir),
             ));
         }
     }
@@ -953,6 +964,104 @@ fn structural_options(config: &CodehealthConfig) -> StructuralOptions {
         max_opaque_percent: config.duplication.structural_max_opaque_percent,
         normalize_literals: config.duplication.structural_normalize_literals,
     }
+}
+
+fn near_duplicate_options(config: &CodehealthConfig) -> NearDuplicateOptions {
+    let overrides = config.rule_options_for(codehealth_duplication::NEAR_FUNCTION_RULE);
+    NearDuplicateOptions {
+        min_lines: overrides
+            .and_then(|options| options.min_lines)
+            .unwrap_or(config.duplication.min_lines),
+        min_tokens: overrides
+            .and_then(|options| options.min_tokens)
+            .unwrap_or(config.duplication.min_tokens),
+        similarity_threshold: config.duplication.near_similarity_threshold,
+        hash_functions: config.duplication.near_hash_functions,
+        lsh_bands: config.duplication.near_lsh_bands,
+        lsh_rows: config.duplication.near_lsh_rows,
+        common_shingle_max_percent: config.duplication.near_common_shingle_max_percent,
+        common_shingle_min_occurrences: config.duplication.near_common_shingle_min_occurrences,
+        max_bucket_size: config.duplication.near_max_bucket_size,
+        max_candidate_pairs: config.duplication.near_max_candidate_pairs,
+    }
+}
+
+fn semantic_duplicate_options(config: &CodehealthConfig) -> SemanticDuplicateOptions {
+    let overrides = config.rule_options_for(codehealth_duplication::SEMANTIC_FUNCTION_RULE);
+    SemanticDuplicateOptions {
+        min_lines: overrides
+            .and_then(|options| options.min_lines)
+            .unwrap_or(SemanticDuplicateOptions::default().min_lines),
+        min_tokens: overrides
+            .and_then(|options| options.min_tokens)
+            .unwrap_or(SemanticDuplicateOptions::default().min_tokens),
+        min_confidence: overrides
+            .and_then(|options| options.min_confidence)
+            .unwrap_or(config.duplication.min_confidence),
+        property_reads_are_pure: config.duplication.semantic_property_reads_are_pure,
+        normalize_boolean_returns: config.duplication.semantic_normalize_boolean_returns,
+        normalize_commutative_ops: config.duplication.semantic_normalize_commutative_ops,
+        normalize_comparisons: config.duplication.semantic_normalize_comparisons,
+    }
+}
+
+fn vector_candidate_options(
+    config: &CodehealthConfig,
+    files: &[WorkspaceFile],
+    no_cache: bool,
+    cache_dir: &Path,
+) -> VectorCandidateOptions {
+    VectorCandidateOptions {
+        min_lines: SemanticDuplicateOptions::default().min_lines,
+        min_tokens: SemanticDuplicateOptions::default().min_tokens,
+        similarity_threshold: config.embeddings.similarity_threshold.as_percent(),
+        candidate_limit: config.embeddings.candidate_limit,
+        provider_id: config.embeddings.provider.clone(),
+        privacy_mode: config.embeddings.privacy_mode.clone(),
+        cache_enabled: config.cache.enabled && config.embeddings.cache_vectors && !no_cache,
+        cache_dir: cache_dir.to_path_buf(),
+        skip_generated_paths: generated_source_paths(files),
+    }
+}
+
+fn effective_cache_dir(args: &RunArgs, config: &CodehealthConfig) -> PathBuf {
+    let cli_default = PathBuf::from(".codehealth/cache");
+    if args.cache_dir == cli_default {
+        config.cache.dir.clone()
+    } else {
+        args.cache_dir.clone()
+    }
+}
+
+fn remove_near_findings_shadowed_by_semantic(
+    findings: &mut Vec<Finding>,
+    semantic_findings: &[Finding],
+) {
+    let semantic_location_sets = semantic_findings
+        .iter()
+        .map(location_set_key)
+        .collect::<BTreeSet<_>>();
+    findings.retain(|finding| {
+        finding.rule_id != codehealth_duplication::NEAR_FUNCTION_RULE
+            || !semantic_location_sets.contains(&location_set_key(finding))
+    });
+}
+
+fn location_set_key(finding: &Finding) -> String {
+    let mut locations = finding
+        .locations
+        .iter()
+        .map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.path.to_string_lossy(),
+                location.span.map(|span| span.start).unwrap_or(0),
+                location.span.map(|span| span.end).unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>();
+    locations.sort();
+    locations.join("|")
 }
 
 fn symbol_inputs_from_files(files: &[WorkspaceFile]) -> Vec<SymbolInput> {

@@ -87,7 +87,13 @@ pub struct WorkspaceConfigFile {
 pub enum ConfigFileKind {
     PackageJson,
     TsconfigJson,
+    EslintConfig,
+    BiomeConfig,
     PyprojectToml,
+    RuffConfig,
+    MypyConfig,
+    PyrightConfig,
+    SemgrepConfig,
     CargoToml,
     RequirementsTxt,
     PoetryLock,
@@ -103,7 +109,13 @@ impl ConfigFileKind {
         match self {
             Self::PackageJson => "package.json",
             Self::TsconfigJson => "tsconfig.json",
+            Self::EslintConfig => "eslint config",
+            Self::BiomeConfig => "biome config",
             Self::PyprojectToml => "pyproject.toml",
+            Self::RuffConfig => "ruff config",
+            Self::MypyConfig => "mypy config",
+            Self::PyrightConfig => "pyrightconfig.json",
+            Self::SemgrepConfig => "semgrep config",
             Self::CargoToml => "Cargo.toml",
             Self::RequirementsTxt => "requirements.txt",
             Self::PoetryLock => "poetry.lock",
@@ -605,7 +617,20 @@ fn config_file_kind(path: &Path) -> Option<ConfigFileKind> {
     match file_name.as_str() {
         "package.json" => Some(ConfigFileKind::PackageJson),
         "tsconfig.json" => Some(ConfigFileKind::TsconfigJson),
+        name if name.starts_with("tsconfig.") && name.ends_with(".json") => {
+            Some(ConfigFileKind::TsconfigJson)
+        }
+        ".eslintrc" | ".eslintrc.json" | ".eslintrc.js" | ".eslintrc.cjs" | ".eslintrc.mjs"
+        | "eslint.config.js" | "eslint.config.cjs" | "eslint.config.mjs" | "eslint.config.ts"
+        | "eslint.config.cts" | "eslint.config.mts" => Some(ConfigFileKind::EslintConfig),
+        "biome.json" | "biome.jsonc" => Some(ConfigFileKind::BiomeConfig),
         "pyproject.toml" => Some(ConfigFileKind::PyprojectToml),
+        "ruff.toml" | ".ruff.toml" => Some(ConfigFileKind::RuffConfig),
+        "mypy.ini" | ".mypy.ini" => Some(ConfigFileKind::MypyConfig),
+        "pyrightconfig.json" => Some(ConfigFileKind::PyrightConfig),
+        "semgrep.yml" | "semgrep.yaml" | ".semgrep.yml" | ".semgrep.yaml" => {
+            Some(ConfigFileKind::SemgrepConfig)
+        }
         "cargo.toml" => Some(ConfigFileKind::CargoToml),
         "requirements.txt" => Some(ConfigFileKind::RequirementsTxt),
         "poetry.lock" => Some(ConfigFileKind::PoetryLock),
@@ -697,7 +722,13 @@ fn observe_config_file(
             let text = read_text_if_small(&config_file.path)?;
             observe_cargo_toml(metadata, text.as_deref());
         }
-        ConfigFileKind::TsconfigJson => {}
+        ConfigFileKind::TsconfigJson
+        | ConfigFileKind::EslintConfig
+        | ConfigFileKind::BiomeConfig
+        | ConfigFileKind::RuffConfig
+        | ConfigFileKind::MypyConfig
+        | ConfigFileKind::PyrightConfig
+        | ConfigFileKind::SemgrepConfig => {}
     }
 
     Ok(())
